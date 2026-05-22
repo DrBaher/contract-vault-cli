@@ -29,6 +29,10 @@ use it.
   is status-aware — only **open** obligations by default (`--status`, `--type`, `--owner`) —
   and expands recurring obligations into occurrences. `config reminders` sets corpus-wide
   default reminder lead-times.
+- **Running on a schedule** (a remote routine / cron / CI that polls and notifies): see
+  [`docs/SCHEDULING.md`](docs/SCHEDULING.md). The pattern is `remind --strict --json` and
+  `risk --within 30d --strict --json` (exit 1 = something to deliver), on the cadence and
+  channel the operator chooses.
 - **stderr** is for humans only: `--why` explanations, warnings, and errors.
   stdout stays clean for piping (`| jq`, `> deadlines.ics`).
 - **Failure**: a one-line `error: <message>` on **stderr**, non-zero exit. There

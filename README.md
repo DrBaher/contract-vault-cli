@@ -216,6 +216,10 @@ contract-vault config reminders --type obligation  --set 14,7
 Resolution per obligation: per-obligation `--reminders` → vault default for its type →
 vault `default` catch-all → built-in default.
 
+**To run these on a schedule** (cron/launchd, a Claude Code remote routine, or CI) and get
+notified — you pick the cadence and channel — see **[`docs/SCHEDULING.md`](docs/SCHEDULING.md)**
+and the example wrapper [`scripts/contract-vault-remind.sh`](scripts/contract-vault-remind.sh).
+
 ---
 
 ## Shell completion

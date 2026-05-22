@@ -6,6 +6,15 @@ All notable changes to **contract-vault** are documented here. The format follow
 semver-meaningful: backward-incompatible record/output changes require a major bump;
 new optional fields are minor additions.
 
+## [Unreleased]
+
+### Docs
+- **`docs/SCHEDULING.md`** + example **`scripts/contract-vault-remind.sh`** — how to run
+  the reminder/at-risk checks on a schedule and get notified, via a local scheduler
+  (cron/launchd), a Claude Code remote routine (`/schedule`), or CI (GitHub Actions). The
+  pattern is `remind --strict --json` / `risk --within 30d --strict --json` (exit 1 = act);
+  cadence and notification channel are the operator's choice. No code/CLI change.
+
 ## [0.4.0] - 2026-05-22
 
 ### Added — corpus-wide reminder policy
