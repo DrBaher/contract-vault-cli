@@ -6,6 +6,24 @@ All notable changes to **contract-vault** are documented here. The format follow
 semver-meaningful: backward-incompatible record/output changes require a major bump;
 new optional fields are minor additions.
 
+## [0.2.0] - 2026-05-22
+
+### Added — obligation lifecycle tracking
+- Every obligation now carries a stable **`id`**, a **`status`** (`open` | `done` | `waived`),
+  and an optional **`owner`** (minor, backward-compatible record/output schema additions —
+  pre-0.2.0 records remain valid and read as `open`).
+- **`obligation <deal> <id> [--status …] [--owner …]`** — track an obligation's lifecycle:
+  mark it done/waived/open and/or assign an owner. Obligations are referenced by id,
+  id-prefix, or `[index]` (shown in `get` and `obligations`/`due`). Commits to the vault;
+  never calls an LLM. An empty `--owner ""` clears the owner.
+- **`due` / `obligations` are now status-aware** — they show **only open** obligations by
+  default (so completing one drops it from the calendar/`.ics`), with `--status open|done|waived|all`,
+  `--type`, and `--owner` filters. `due --format json` rows (and the ics) carry `id`,
+  `status`, and `owner`.
+- **Lifecycle survives recompute** — marking an obligation done/assigning an owner is
+  preserved when `accept` recomputes the schedule (carried forward by id). `get` shows each
+  obligation's id, status, and owner.
+
 ## [0.1.8] - 2026-05-22
 
 ### Added
@@ -171,6 +189,8 @@ Initial release: the post-signature management layer of the contract-ops CLI sui
   tests dependency-free; fixtures vendor sample extract JSON so the suite runs offline and
   without extract-cli installed. Property tests use stdlib `random.Random(seed)`.
 
+[0.2.0]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.2.0
+[0.1.8]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.8
 [0.1.7]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.7
 [0.1.6]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.6
 [0.1.5]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.5

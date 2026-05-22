@@ -118,7 +118,10 @@
           "due": { "$ref": "#/$defs/nullableString" },
           "description": { "type": "string" },
           "source": { "$ref": "#/$defs/source" },
-          "confidence": { "$ref": "#/$defs/confidence" }
+          "confidence": { "$ref": "#/$defs/confidence" },
+          "id": { "type": "string" },
+          "status": { "enum": ["open", "done", "waived"] },
+          "owner": { "$ref": "#/$defs/nullableString" }
         }
       }
     },

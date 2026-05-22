@@ -1,15 +1,19 @@
 # Agents
 
-Drive `contract-vault` from an LLM agent or non-interactive client. Same agent
-contract as the rest of the contract-ops suite: a stable machine-readable
-catalog, data on stdout, humans on stderr, and a small documented exit-code set.
+Drive `contract-vault` from an LLM agent or non-interactive client. Stable
+machine-readable catalog, data on stdout, humans on stderr, a small documented
+exit-code set.
 
-`contract-vault` is the suite's **post-signature ("manage-out") layer**: register
-a *signed* contract (typically from [`extract-cli`](https://github.com/DrBaher/extract-cli)
-output), then search the portfolio and surface renewals, notice deadlines, and
-obligations. Every field carries a `confidence` and a `source` (it inherits
-extract-cli's "verify, don't trust" envelope), and a human-review/`accept`
-workflow promotes fields to `source: manual`.
+`contract-vault` is a git-backed register for **signed** contracts: register a
+signed contract, then search the portfolio and surface renewals, notice
+deadlines, and obligations. Every field carries a `confidence` and a `source`,
+and a human-review/`accept` workflow promotes fields to `source: manual`.
+
+It works standalone, and it also **composes with the contract-ops suite**: it can
+ingest [`extract-cli`](https://github.com/DrBaher/extract-cli) output (inheriting
+its "verify, don't trust" envelope) and follows the suite's agent conventions
+(`--catalog json`, the shared LLM config). You don't need the rest of the suite to
+use it.
 
 ## Output contract
 
@@ -19,6 +23,10 @@ workflow promotes fields to `source: manual`.
   `verify`, `history`). `due`/`obligations` and `export` take a richer
   **`--format`**: `due --format ics|json|table` (ICS calendar feed), `export
   --format csv|md|json`. `--json` forces JSON where a `--format` also exists.
+- **Write commands** mutate the vault and commit: `ingest`, `accept <deal> <field>`
+  (mark a field `manual`; bulk `--from`), and `obligation <deal> <id> --status
+  open|done|waived [--owner …]` (track obligation lifecycle). `due`/`obligations` is
+  status-aware — only **open** obligations by default (`--status`, `--type`, `--owner`).
 - **stderr** is for humans only: `--why` explanations, warnings, and errors.
   stdout stays clean for piping (`| jq`, `> deadlines.ics`).
 - **Failure**: a one-line `error: <message>` on **stderr**, non-zero exit. There

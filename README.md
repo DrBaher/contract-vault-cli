@@ -1,28 +1,27 @@
 # contract-vault
 
-**The post-signature management layer of the [contract-ops CLI suite](https://github.com/DrBaher).**
-
-```
-extract → draft → review → compare → convert → sign → **contract-vault**
-   (entry)            (core authoring / negotiation)        (manage-out)
-```
-
-[`template-vault`](https://github.com/DrBaher/template-vault-CLI) stores **blanks**
-(clauses, variables, composition). **contract-vault** is its post-signature sibling: it
-stores **signed instances** — the parties, dates, money, and obligations of executed
-deals — in the same git-backed, single-file, subcommand-rich shape. It is where executed
-contracts are **registered, searched**, and where **renewal / notice / payment deadlines**
-are surfaced as a calendar.
+**Never miss a contract renewal, notice deadline, or obligation.** A git-backed
+register for your **signed** contracts: register an executed deal, then search the
+portfolio and surface **renewal / notice / payment deadlines** as a calendar.
+Local-first, single-file, stdlib-only — no DB, no daemon, no SaaS.
 
 `obligations` is a *view* over the register, not a separate tool.
 
 - **Stdlib only.** Zero runtime dependencies; fully functional with no extras.
 - **Git-backed, single file.** No DB, no daemon. The vault is a plain git repo.
 - **Deterministic.** The register, `.ics` calendar, and reminders work fully with the
-  LLM **off**. Any LLM need is *delegated* to the `extract` step you call — never
-  reimplemented here, never on a hot path.
+  LLM **off** and no network.
 - **Verify, not trust.** Every field carries its `source` (`deterministic` | `llm` |
-  `manual` | `none`) and a confidence, propagated from extract and surfaced everywhere.
+  `manual` | `none`) and a confidence, surfaced everywhere.
+
+> **Part of the contract-ops suite — optional.** contract-vault stands on its own,
+> but it also composes with the [contract-ops CLI suite](https://github.com/DrBaher):
+> it can ingest [`extract-cli`](https://github.com/DrBaher/extract-cli) output (so any
+> LLM/parsing need is delegated to that extraction step, never reimplemented here) and
+> shares the suite's agent conventions — sitting at the manage-out end of
+> `extract → … → sign → contract-vault`. It's the post-signature sibling of
+> [`template-vault`](https://github.com/DrBaher/template-vault-CLI): template-vault
+> stores blank templates, contract-vault stores the signed instances.
 
 ---
 
@@ -131,7 +130,8 @@ is idempotent.
 | `list` | List stored deals. |
 | `get <id>` / `show <id>` | Print one record (by path, leaf name, or unique prefix). |
 | `find` / `search` | Query by `--counterparty`, `--governing-law`, `--currency CCC`, `--expiring-before DATE`, `--value-gt N`, `--auto-renew`, or full-text. Pair `--currency` with `--value-gt` for currency-aware thresholds. |
-| `due` / `obligations` | Project upcoming actions. `--within 30d\|60d\|90d`, `--format ics\|json\|table`. Emits valid RFC 5545 `.ics`. |
+| `due` / `obligations` | Project upcoming actions. `--within 30d\|60d\|90d`, `--format ics\|json\|table`, `--status open\|done\|waived\|all` (default open), `--type`, `--owner`. Emits valid RFC 5545 `.ics`. |
+| `obligation <deal> <id>` | Track an obligation's lifecycle: `--status open\|done\|waived` and/or `--owner NAME`. Completed obligations drop off `due`. |
 | `stats` | Portfolio stats: count, total value, expiring soon, by counterparty / governing law. |
 | `export` | Export the register as `csv` / `md` / `json` (`--expiring-before`, `--needs-review`). For spreadsheets & reports. |
 | `verify` | Integrity check: source `sha256` matches + git tree clean. |

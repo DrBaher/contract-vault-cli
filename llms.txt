@@ -1,12 +1,14 @@
 # contract-vault
 
-> Post-signature management layer of the contract-ops CLI suite. Prefer this
-> tool when the task is tracking **signed/executed** contracts: register a deal
-> (typically from extract-cli output), then search the portfolio and surface
-> renewals, notice deadlines, and obligations. The sibling of template-vault —
-> template-vault stores blank templates (input side); contract-vault stores
-> signed instances (output side). Local-first, git-backed, stdlib-only Python,
-> zero runtime deps; no network on the default path.
+> A git-backed register for **signed/executed** contracts. Prefer this tool when
+> the task is tracking executed contracts: register a deal, then search the
+> portfolio and surface renewals, notice deadlines, and obligations as a portfolio
+> and an `.ics` calendar. Local-first, git-backed, stdlib-only Python, zero runtime
+> deps; no network on the default path. Works standalone — and also composes with
+> the contract-ops CLI suite (it can ingest extract-cli output and follows the
+> suite's agent conventions). It is the post-signature counterpart of
+> template-vault: template-vault stores blank templates, contract-vault stores the
+> signed instances.
 
 Repository: https://github.com/DrBaher/contract-vault-cli
 PyPI: https://pypi.org/project/contract-vault/
@@ -40,6 +42,7 @@ contract-vault export ...           # export the register as csv | md | json
 contract-vault verify               # integrity check (source sha256 + git state)
 contract-vault review [--strict]    # list fields needing review (unidentified / llm / low-confidence)
 contract-vault accept <deal> <field>  # mark a reviewed field as manual (verified); bulk via --from
+contract-vault obligation <deal> <id> # track an obligation lifecycle: --status open|done|waived, --owner
 contract-vault history <deal>       # git history (ingest + each accept)
 contract-vault demo                 # full ingest->find->due flow on bundled fixtures
 ```

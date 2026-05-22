@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""contract-vault — the post-signature management layer of the contract-ops CLI suite.
+"""contract-vault — a git-backed register for SIGNED contracts: register executed
+deals, then search the portfolio and surface renewals, notice deadlines, and
+obligations as a calendar. Local-first, single-file, stdlib-only.
 
-The suite lifecycle:
+"obligations" is a VIEW over the register, not a separate tool.
+
+Stands alone, but composes with the contract-ops CLI suite (it ingests extract-cli
+output and shares the suite's agent conventions), sitting at the manage-out end of:
 
     extract (entry) -> draft / review / compare / convert / sign (core) -> contract-vault (manage-out)
 
-``template-vault`` stores BLANKS (clauses, variables, composition). ``contract-vault``
-is its post-signature sibling: it stores SIGNED INSTANCES (parties, dates, obligations)
-in the same git-backed, single-file, subcommand-rich shape. It is where executed deals
-are registered, searched, and where renewal / notice / payment deadlines are surfaced
-as a calendar. "obligations" is a VIEW over the register, not a separate tool.
+It is the post-signature sibling of ``template-vault`` (which stores BLANKS — clauses,
+variables, composition); contract-vault stores SIGNED INSTANCES (parties, dates,
+obligations) in the same git-backed, single-file, subcommand-rich shape.
 
 contract-vault does NOT extract documents itself. ``ingest`` consumes the JSON emitted
 by ``extract-cli`` (https://github.com/DrBaher/extract-cli) -- either by shelling out to
@@ -37,7 +40,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
-__version__ = "0.1.8"
+__version__ = "0.2.0"
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -596,6 +599,34 @@ def validate_extract_payload(payload: Any) -> JSONObj:
     return cast(JSONObj, payload)
 
 
+OBLIGATION_STATUSES = ("open", "done", "waived")
+
+
+def obligation_id(ob: JSONObj) -> str:
+    """Stable, content-derived id for an obligation (referenced by the `obligation` command)."""
+    seed = f"{ob.get('type', '')}|{ob.get('description', '')}"
+    return "o" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:8]
+
+
+def finalize_obligations(obligations: List[JSONObj], carry: Optional[Dict[str, JSONObj]] = None) -> List[JSONObj]:
+    """Stamp a stable id + lifecycle fields (status/owner) on each obligation.
+
+    Preserves any existing status/owner; for freshly-rebuilt derived items, carries the
+    prior status/owner forward by id (so a recomputed schedule keeps 'done'/'waived' when
+    the obligation is unchanged). Missing status defaults to 'open'.
+    """
+    carry = carry or {}
+    for ob in obligations:
+        oid = obligation_id(ob)
+        ob["id"] = oid
+        prior = carry.get(oid, {})
+        if not ob.get("status"):
+            ob["status"] = str(prior.get("status") or "open")
+        if "owner" not in ob or ob.get("owner") is None:
+            ob["owner"] = prior.get("owner")
+    return obligations
+
+
 def build_record(
     payload: JSONObj,
     *,
@@ -723,6 +754,7 @@ def build_record(
                     "confidence": round(oconf, 4),
                 }
             )
+    finalize_obligations(obligations)  # stamp stable id + status=open + owner=null
 
     # Provenance ------------------------------------------------------------
     meta = payload.get("_meta", {}) or {}
@@ -798,28 +830,45 @@ def upcoming_obligations(
     *,
     within_days: int,
     as_of: dt.date,
+    statuses: Optional[Sequence[str]] = None,
+    type_filter: Optional[str] = None,
+    owner_filter: Optional[str] = None,
 ) -> List[JSONObj]:
-    """Project dated obligations across all deals into actions within the window."""
+    """Project dated obligations across all deals into actions within the window.
+
+    By default only OPEN obligations are projected (so completing one drops it from the
+    calendar); pass statuses=("open","done","waived") or None-with-all to widen. Missing
+    status is treated as 'open' for backward compatibility with pre-0.2.0 records.
+    """
+    include = set(statuses) if statuses else {"open"}
     horizon = as_of + dt.timedelta(days=within_days)
     rows: List[JSONObj] = []
     for rid, _dir, rec in load_all_records(vault):
         counterparty = primary_counterparty(rec)
         for ob in rec.get("obligations", []):
+            if str(ob.get("status") or "open") not in include:
+                continue
+            if type_filter and str(ob.get("type", "")) != type_filter:
+                continue
+            if owner_filter and str(ob.get("owner") or "").lower() != owner_filter.lower():
+                continue
             due_s = ob.get("due")
             if not due_s:
                 continue
             due = parse_date(due_s)
             if due is None or due < as_of or due > horizon:
                 continue
-            days_until = (due - as_of).days
             rows.append(
                 {
+                    "id": ob.get("id", obligation_id(ob)),
                     "deal": rid,
                     "counterparty": counterparty,
                     "type": ob.get("type", "obligation"),
                     "due": due.isoformat(),
-                    "days_until": days_until,
+                    "days_until": (due - as_of).days,
                     "description": ob.get("description", ""),
+                    "status": str(ob.get("status") or "open"),
+                    "owner": ob.get("owner"),
                     "source": ob.get("source", SOURCE_NONE),
                     "confidence": ob.get("confidence", 0.0),
                     "lead_days": _suggest_lead_days(str(ob.get("type", ""))),
@@ -921,6 +970,12 @@ def recompute_schedule(record: JSONObj) -> None:
         rw = {"deadline": (exp - dt.timedelta(days=notice)).isoformat(), "expiration": exp.isoformat()}
     term["renewal_window"] = rw
 
+    # Preserve lifecycle (status/owner) across recompute, keyed by stable obligation id.
+    carry: Dict[str, JSONObj] = {
+        str(o["id"]): {"status": o.get("status"), "owner": o.get("owner")}
+        for o in record.get("obligations", [])
+        if isinstance(o, dict) and o.get("id")
+    }
     text_obs = [o for o in record.get("obligations", []) if isinstance(o, dict) and o.get("type") == "obligation"]
     derived: List[JSONObj] = []
     if exp is not None:
@@ -944,7 +999,7 @@ def recompute_schedule(record: JSONObj) -> None:
                 "confidence": round(min(exp_conf, np_conf), 4),
             }
         )
-    record["obligations"] = derived + text_obs
+    record["obligations"] = finalize_obligations(derived + text_obs, carry)
 
 
 def _parse_bool(raw: str) -> Optional[bool]:
@@ -1315,7 +1370,9 @@ def cmd_get(args: argparse.Namespace) -> int:
     if obs:
         _out("  obligations:")
         for ob in obs:
-            _out(f"    - [{ob.get('type')}] due {ob.get('due') or '-'}  {ob.get('description')}  ({ob.get('source')}, conf {ob.get('confidence')})")
+            owner = f" @{ob.get('owner')}" if ob.get("owner") else ""
+            st = str(ob.get("status") or "open")
+            _out(f"    - {_dim(str(ob.get('id', '')))} [{ob.get('type')}] {st}{owner} due {ob.get('due') or '-'}  {ob.get('description')}  ({ob.get('source')}, conf {ob.get('confidence')})")
     prov = rec.get("provenance", {})
     _out(_dim(f"  provenance:      from_extract={prov.get('from_extract')} extractor={prov.get('extractor_version')} llm_used={prov.get('llm_used')} ingested {prov.get('ingested_at')}"))
     flags = review_flags(rec)
@@ -1427,11 +1484,16 @@ def cmd_due(args: argparse.Namespace) -> int:
     if getattr(args, "as_of", None) and as_of is None:
         raise UsageError(f"invalid --as-of date: {args.as_of!r}")
     assert as_of is not None
-    rows = upcoming_obligations(vault, within_days=within, as_of=as_of)
+    status_arg = getattr(args, "status", None) or "open"
+    statuses = list(OBLIGATION_STATUSES) if status_arg == "all" else [status_arg]
+    rows = upcoming_obligations(
+        vault, within_days=within, as_of=as_of, statuses=statuses,
+        type_filter=getattr(args, "type", None), owner_filter=getattr(args, "owner", None),
+    )
     fmt = getattr(args, "format", None) or ("json" if getattr(args, "json", False) else "table")
     if getattr(args, "json", False):
         fmt = "json"
-    _why(args, "due", f"as_of={as_of.isoformat()}", f"within_days={within}", f"actions={len(rows)}", f"format={fmt}")
+    _why(args, "due", f"as_of={as_of.isoformat()}", f"within_days={within}", f"status={status_arg}", f"actions={len(rows)}", f"format={fmt}")
     if fmt == "ics":
         sys.stdout.write(build_ics(rows))
         return EXIT_OK
@@ -1453,7 +1515,8 @@ def cmd_due(args: argparse.Namespace) -> int:
     _out(_bold(f"Upcoming obligations within {within} days (as of {as_of.isoformat()}):"))
     for r in rows:
         when = _yellow(r["due"]) if r["days_until"] <= 14 else r["due"]
-        _out(f"  {when}  (+{r['days_until']}d)  {_bold(str(r['type']))}  {r['counterparty']}  -- {r['description']}")
+        owner = f"  @{r['owner']}" if r.get("owner") else ""
+        _out(f"  {_dim(str(r['id']))}  {when}  (+{r['days_until']}d)  {_bold(str(r['type']))}  {r['counterparty']}{owner}  -- {r['description']}")
     return EXIT_OK
 
 
@@ -1941,6 +2004,52 @@ def cmd_history(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def find_obligation(record: JSONObj, ref: str) -> JSONObj:
+    """Resolve an obligation within a record by id, unique id-prefix, or [i] index."""
+    obs = [o for o in record.get("obligations", []) if isinstance(o, dict)]
+    idx_match = re.fullmatch(r"\[?(\d+)\]?", ref)
+    if idx_match:
+        i = int(idx_match.group(1))
+        if i < len(obs):
+            return obs[i]
+    exact = [o for o in obs if o.get("id") == ref]
+    if len(exact) == 1:
+        return exact[0]
+    prefix = [o for o in obs if str(o.get("id", "")).startswith(ref)]
+    if len(prefix) == 1:
+        return prefix[0]
+    if not obs:
+        raise NotFoundError("this deal has no obligations")
+    raise UsageError(f"no unique obligation matching {ref!r}; run `contract-vault get <deal>` to list ids")
+
+
+def cmd_obligation(args: argparse.Namespace) -> int:
+    """Track an obligation's lifecycle: set its status (open/done/waived) and/or owner.
+    Deterministic and local -- commits to the vault. Never calls an LLM."""
+    vault = resolve_vault(args)
+    rid, deal_dir, rec = find_deal(vault, args.deal)
+    ob = find_obligation(rec, args.id)
+    status = getattr(args, "status", None)
+    owner = getattr(args, "owner", None)
+    if status is None and owner is None:
+        raise UsageError("provide --status {open,done,waived} and/or --owner NAME")
+    if status is not None:
+        if status not in OBLIGATION_STATUSES:
+            raise UsageError(f"invalid --status {status!r}; choose from {', '.join(OBLIGATION_STATUSES)}")
+        ob["status"] = status
+    if owner is not None:
+        ob["owner"] = owner or None  # empty string clears the owner
+    rec.setdefault("provenance", {})["last_reviewed_at"] = _now_iso()
+    (deal_dir / RECORD_FILENAME).write_text(_dump_json(rec), encoding="utf-8")
+    git_commit(vault, f"obligation: {rid} {ob['id']} status={ob.get('status')} owner={ob.get('owner')}", paths=[deal_dir])
+    _why(args, "obligation", f"deal={rid}", f"id={ob['id']}", f"status={ob.get('status')}", f"owner={ob.get('owner')}")
+    if getattr(args, "json", False):
+        _emit_json({"deal": rid, "id": ob["id"], "type": ob.get("type"), "status": ob.get("status"), "owner": ob.get("owner"), "due": ob.get("due")})
+    else:
+        _out(_green(f"{rid} :: {ob['id']} [{ob.get('type')}] -> status={ob.get('status')}" + (f" owner={ob.get('owner')}" if ob.get("owner") else "")))
+    return EXIT_OK
+
+
 def cmd_demo(args: argparse.Namespace) -> int:
     import tempfile
 
@@ -1984,7 +2093,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
 SUBCOMMANDS = [
     "init", "ingest", "list", "get", "show", "find", "search",
     "due", "obligations", "stats", "verify", "review", "accept", "export",
-    "risk", "history", "demo",
+    "risk", "history", "obligation", "demo",
 ]
 FIND_FLAGS = [
     "--counterparty", "--governing-law", "--currency", "--expiring-before",
@@ -2001,7 +2110,7 @@ def cmd_complete(words: Sequence[str]) -> int:
         candidates: List[str] = []
         if len(words) <= 1:
             candidates = SUBCOMMANDS
-        elif sub in ("get", "show", "verify", "accept", "history"):
+        elif sub in ("get", "show", "verify", "accept", "history", "obligation"):
             try:
                 vault = resolve_vault(argparse.Namespace())
                 candidates = [rid for rid, _d, _r in load_all_records(vault)]
@@ -2114,7 +2223,7 @@ def _add_common(p: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="contract-vault",
-        description="Register, search and surface deadlines for SIGNED contracts (the manage-out end of the contract-ops suite).",
+        description="Register signed contracts and surface their renewals, notice deadlines, and obligations. Git-backed, local-first.",
     )
     parser.add_argument("-V", "--version", action="version", version=f"contract-vault {__version__}")
     parser.add_argument("--no-color", action="store_true", help="disable ANSI color")
@@ -2162,6 +2271,9 @@ def build_parser() -> argparse.ArgumentParser:
         p_due.add_argument("--within", default="90d", help="window, e.g. 30d/60d/90d (default 90d)")
         p_due.add_argument("--format", choices=["ics", "json", "table"], help="output format (default table; --json forces json)")
         p_due.add_argument("--as-of", dest="as_of", metavar="DATE", help="reference 'today' (default: actual today)")
+        p_due.add_argument("--status", choices=["open", "done", "waived", "all"], help="filter by obligation status (default: open)")
+        p_due.add_argument("--type", help="filter by obligation type (expiration|renewal_notice|obligation)")
+        p_due.add_argument("--owner", help="filter by assigned owner")
         p_due.set_defaults(func=cmd_due)
 
     p_stats = sub.add_parser("stats", help="portfolio statistics")
@@ -2206,6 +2318,14 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(p_history)
     p_history.add_argument("deal", help="deal id (path, leaf name, or unique prefix)")
     p_history.set_defaults(func=cmd_history)
+
+    p_ob = sub.add_parser("obligation", help="track an obligation's lifecycle: --status / --owner (see `obligations` for the list)")
+    _add_common(p_ob)
+    p_ob.add_argument("deal", help="deal id (path, leaf name, or unique prefix)")
+    p_ob.add_argument("id", help="obligation id, id-prefix, or [index] (from `get`/`obligations`)")
+    p_ob.add_argument("--status", choices=list(OBLIGATION_STATUSES), help="set status (open/done/waived)")
+    p_ob.add_argument("--owner", help="set responsible owner (empty string clears it)")
+    p_ob.set_defaults(func=cmd_obligation)
 
     p_demo = sub.add_parser("demo", help="run the full ingest->find->due flow on bundled fixtures")
     _add_common(p_demo)
@@ -2274,8 +2394,9 @@ def build_catalog() -> JSONObj:
         "bin": "contract-vault",
         "version": __version__,
         "description": (
-            "Post-signature management layer of the contract-ops CLI suite: register, "
-            "search and surface deadlines for SIGNED contracts."
+            "Git-backed register for signed contracts: register executed deals, then "
+            "surface renewals, notice deadlines, and obligations as a portfolio and an "
+            ".ics calendar."
         ),
         "commands": commands,
         "exitCodes": {
