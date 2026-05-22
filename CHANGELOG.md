@@ -6,6 +6,20 @@ All notable changes to **contract-vault** are documented here. The format follow
 semver-meaningful: backward-incompatible record/output changes require a major bump;
 new optional fields are minor additions.
 
+## [0.4.0] - 2026-05-22
+
+### Added — corpus-wide reminder policy
+- **`config reminders`** — set default reminder lead-times **once for the whole corpus**,
+  per obligation type (`expiration`/`renewal_notice`/`obligation`) plus a `default`
+  catch-all, stored in `.contract-vault.json`. Resolution order for any obligation:
+  per-obligation `--reminders` override → vault default for its type → vault `default` →
+  built-in type default. So `config reminders --type expiration --set 60,30,7` instantly
+  applies to every contract's expiration reminders (in `due`/`remind` and the `.ics`
+  VALARMs), still overridable on any single obligation.
+  - `config reminders --show` / `--json` to inspect; `--clear` to remove a type's default.
+- Vault-config helpers (`load_vault_config`/`save_vault_config`); no record/output schema
+  change.
+
 ## [0.3.1] - 2026-05-22
 
 ### Added
@@ -214,6 +228,7 @@ Initial release: the post-signature management layer of the contract-ops CLI sui
   tests dependency-free; fixtures vendor sample extract JSON so the suite runs offline and
   without extract-cli installed. Property tests use stdlib `random.Random(seed)`.
 
+[0.4.0]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.4.0
 [0.3.1]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.3.1
 [0.3.0]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.3.0
 [0.2.0]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.2.0

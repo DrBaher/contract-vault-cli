@@ -139,6 +139,7 @@ is idempotent.
 | `accept <deal> <field>` | Mark a reviewed field as human-verified (`source=manual`), optionally `--value` to correct it; recomputes the calendar for date/term changes. Bulk via `accept --from FILE`. |
 | `risk` / `at-risk` | Renewal exposure: **missed** notice deadlines (CRITICAL if auto-renewing), imminent notices, and expirations (`--within`, `--strict`). |
 | `remind` | The reminder digest: obligations whose reminder window is open right now (honors per-obligation `--reminders`). For cron/agents (`--strict`, `--format`). |
+| `config reminders` | Set **corpus-wide** default reminder lead-times per type (`--type … --set 60,30,7`), `--show`/`--clear`. Applies to every contract; overridable per obligation. |
 | `history <deal>` | The deal's git history (ingest + each accept). |
 | `demo` | Run the full flow on bundled fixtures (no extract-cli, no LLM). |
 
@@ -206,6 +207,14 @@ contract-vault remind --strict --json # exit 1 + JSON if anything is due (cron/a
 It returns each obligation only while `0 ≤ days_until ≤ its longest reminder lead`, honoring
 `obligation <deal> <id> --reminders 30,7`. A daily `remind --json` is exactly the set a
 notifier should send.
+
+Set lead-times **once for the whole corpus** (instead of per obligation) with a vault policy:
+```bash
+contract-vault config reminders --type expiration --set 60,30,7   # applies to every contract
+contract-vault config reminders --type obligation  --set 14,7
+```
+Resolution per obligation: per-obligation `--reminders` → vault default for its type →
+vault `default` catch-all → built-in default.
 
 ---
 

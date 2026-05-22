@@ -27,7 +27,8 @@ use it.
   (mark a field `manual`; bulk `--from`), and `obligation <deal> <id>` (track lifecycle:
   `--status open|done|waived`, `--owner`, `--recurrence`, `--reminders`). `due`/`obligations`
   is status-aware — only **open** obligations by default (`--status`, `--type`, `--owner`) —
-  and expands recurring obligations into occurrences.
+  and expands recurring obligations into occurrences. `config reminders` sets corpus-wide
+  default reminder lead-times.
 - **stderr** is for humans only: `--why` explanations, warnings, and errors.
   stdout stays clean for piping (`| jq`, `> deadlines.ics`).
 - **Failure**: a one-line `error: <message>` on **stderr**, non-zero exit. There

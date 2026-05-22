@@ -44,6 +44,7 @@ contract-vault review [--strict]    # list fields needing review (unidentified /
 contract-vault accept <deal> <field>  # mark a reviewed field as manual (verified); bulk via --from
 contract-vault obligation <deal> <id> # track an obligation: --status open|done|waived, --owner, --recurrence, --reminders
 contract-vault remind [--strict]    # obligations whose reminder window is open now (cron/agent digest)
+contract-vault config reminders ... # corpus-wide default reminder lead-times (--type T --set 60,30,7 | --show)
 contract-vault history <deal>       # git history (ingest + each accept)
 contract-vault demo                 # full ingest->find->due flow on bundled fixtures
 ```

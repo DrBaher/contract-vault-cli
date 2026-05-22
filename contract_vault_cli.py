@@ -41,7 +41,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -490,6 +490,22 @@ def is_vault(path: Path) -> bool:
     return (path / VAULT_CONFIG_NAME).is_file()
 
 
+def load_vault_config(vault: Path) -> JSONObj:
+    """Read .contract-vault.json; returns {} if missing/unreadable (never raises)."""
+    p = vault / VAULT_CONFIG_NAME
+    if not p.is_file():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return cast(JSONObj, data) if isinstance(data, dict) else {}
+
+
+def save_vault_config(vault: Path, config: JSONObj) -> None:
+    (vault / VAULT_CONFIG_NAME).write_text(_dump_json(config), encoding="utf-8")
+
+
 def resolve_vault(args: argparse.Namespace) -> Path:
     """Locate the vault: --vault flag, CONTRACT_VAULT_DIR env, then walk up from cwd."""
     explicit = getattr(args, "vault", None) or os.environ.get("CONTRACT_VAULT_DIR")
@@ -680,14 +696,26 @@ def recurrence_occurrences(anchor: dt.date, freq: str, start: dt.date, end: dt.d
     return out
 
 
-def obligation_reminders(ob: JSONObj) -> List[int]:
-    """Lead-day reminders for an obligation: explicit override, else the type default."""
-    r = ob.get("reminders")
-    if isinstance(r, list) and r:
-        leads = [int(x) for x in r if isinstance(x, (int, float)) and not isinstance(x, bool) and x >= 0]
+def _coerce_leads(value: Any) -> List[int]:
+    if not isinstance(value, list):
+        return []
+    return sorted({int(x) for x in value if isinstance(x, (int, float)) and not isinstance(x, bool) and x >= 0}, reverse=True)
+
+
+def obligation_reminders(ob: JSONObj, defaults: Optional[JSONObj] = None) -> List[int]:
+    """Lead-day reminders for an obligation, resolved in order:
+    explicit per-obligation override -> vault default for this type -> vault 'default'
+    catch-all -> built-in type default.
+    """
+    explicit = _coerce_leads(ob.get("reminders"))
+    if explicit:
+        return explicit
+    typ = str(ob.get("type", ""))
+    for key in (typ, "default"):
+        leads = _coerce_leads((defaults or {}).get(key))
         if leads:
-            return sorted(set(leads), reverse=True)
-    return [_suggest_lead_days(str(ob.get("type", "")))]
+            return leads
+    return [_suggest_lead_days(typ)]
 
 
 def build_record(
@@ -911,6 +939,8 @@ def upcoming_obligations(
     """
     include = set(statuses) if statuses else {"open"}
     horizon = as_of + dt.timedelta(days=within_days)
+    reminder_defaults = load_vault_config(vault).get("reminder_defaults")
+    reminder_defaults = reminder_defaults if isinstance(reminder_defaults, dict) else {}
     rows: List[JSONObj] = []
     for rid, _dir, rec in load_all_records(vault):
         counterparty = primary_counterparty(rec)
@@ -925,7 +955,7 @@ def upcoming_obligations(
             anchor = parse_date(ob.get("due"))
             if anchor is None:
                 continue  # dateless obligation: tracked, but no calendar entry
-            reminders = obligation_reminders(ob)
+            reminders = obligation_reminders(ob, reminder_defaults)
             # remind_only: each obligation's own reminder window; else the shared horizon.
             end = (as_of + dt.timedelta(days=max(reminders))) if remind_only else horizon
             freq = ob.get("recurrence") if ob.get("recurrence") in RECURRENCE_FREQS else None
@@ -2207,6 +2237,54 @@ def cmd_obligation(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+_BUILTIN_REMINDER_DEFAULTS = {t: [_suggest_lead_days(t)] for t in ("expiration", "renewal_notice", "obligation")}
+
+
+def cmd_config(args: argparse.Namespace) -> int:
+    """Get/set vault-wide settings. Currently: `config reminders` -- default reminder
+    lead-times applied to every obligation in the corpus (per-type, overridable per
+    obligation). Stored in .contract-vault.json; commits to the vault."""
+    vault = resolve_vault(args)
+    if args.topic != "reminders":
+        raise UsageError(f"unknown config topic {args.topic!r} (only 'reminders')")
+    cfg = load_vault_config(vault)
+    rd = cfg.get("reminder_defaults")
+    rd = dict(rd) if isinstance(rd, dict) else {}
+
+    set_arg = getattr(args, "set", None)
+    clearing = getattr(args, "clear", False)
+    if set_arg is not None or clearing:
+        if not getattr(args, "type", None):
+            raise UsageError("--set/--clear require --type {expiration,renewal_notice,obligation,default}")
+        if clearing:
+            rd.pop(args.type, None)
+        else:
+            assert set_arg is not None
+            try:
+                vals = [int(x) for x in set_arg.replace(" ", "").split(",") if x]
+            except ValueError:
+                raise UsageError("--set must be comma-separated day counts, e.g. 60,30,7")
+            if not vals or any(v < 0 for v in vals):
+                raise UsageError("--set must be one or more non-negative day counts")
+            rd[args.type] = sorted(set(vals), reverse=True)
+        cfg["reminder_defaults"] = rd
+        save_vault_config(vault, cfg)
+        git_commit(vault, f"config: reminder default {args.type}=" + ("cleared" if clearing else str(rd.get(args.type))),
+                   paths=[vault / VAULT_CONFIG_NAME])
+
+    _why(args, "config", f"topic=reminders", f"configured={list(rd)}")
+    if getattr(args, "json", False):
+        _emit_json({"reminder_defaults": rd, "builtin_fallback": _BUILTIN_REMINDER_DEFAULTS})
+        return EXIT_OK
+    _out(_bold("Reminder defaults (corpus-wide; overridable per obligation):"))
+    if not rd:
+        _out(_dim("  (none set -- using built-in defaults below)"))
+    for typ, leads in rd.items():
+        _out(f"  {typ}: {leads}")
+    _out(_dim("  built-in fallback: " + ", ".join(f"{t}={l}" for t, l in _BUILTIN_REMINDER_DEFAULTS.items())))
+    return EXIT_OK
+
+
 def cmd_demo(args: argparse.Namespace) -> int:
     import tempfile
 
@@ -2250,7 +2328,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
 SUBCOMMANDS = [
     "init", "ingest", "list", "get", "show", "find", "search",
     "due", "obligations", "stats", "verify", "review", "accept", "export",
-    "risk", "history", "obligation", "remind", "demo",
+    "risk", "history", "obligation", "remind", "config", "demo",
 ]
 FIND_FLAGS = [
     "--counterparty", "--governing-law", "--currency", "--expiring-before",
@@ -2432,6 +2510,15 @@ def build_parser() -> argparse.ArgumentParser:
         p_due.add_argument("--type", help="filter by obligation type (expiration|renewal_notice|obligation)")
         p_due.add_argument("--owner", help="filter by assigned owner")
         p_due.set_defaults(func=cmd_due)
+
+    p_config = sub.add_parser("config", help="get/set vault-wide settings (currently: corpus-wide reminder defaults)")
+    _add_common(p_config)
+    p_config.add_argument("topic", choices=["reminders"], help="config topic")
+    p_config.add_argument("--type", dest="type", choices=["expiration", "renewal_notice", "obligation", "default"], help="obligation type (or 'default' catch-all)")
+    p_config.add_argument("--set", dest="set", metavar="DAYS", help="set reminder lead-times for --type, comma-separated (e.g. 60,30,7)")
+    p_config.add_argument("--clear", action="store_true", help="clear the default for --type")
+    p_config.add_argument("--show", action="store_true", help="show current reminder defaults (default action)")
+    p_config.set_defaults(func=cmd_config)
 
     p_remind = sub.add_parser("remind", help="obligations whose reminder window is open right now (digest for cron/agents)")
     _add_common(p_remind)
