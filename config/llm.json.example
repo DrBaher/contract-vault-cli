@@ -1,0 +1,7 @@
+{
+  "provider": "anthropic",
+  "model": "claude-opus-4-7",
+  "api_key": "REPLACE_WITH_YOUR_KEY_OR_USE_ENV",
+  "base_url": null,
+  "_note": "contract-vault never calls an LLM itself. LLM use is opt-in and DELEGATED to the extract step: `contract-vault ingest <file> --llm` forwards --llm to `extract`. This file is looked up (suite-wide ~/.config/contract-ops/llm.json first, then ./config/llm.json) only to confirm a config exists; copy it to one of those paths and fill in your key. provider is one of {anthropic, openai}; base_url applies to OpenAI-compatible endpoints only."
+}
