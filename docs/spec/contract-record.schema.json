@@ -130,7 +130,8 @@
         "from_extract": { "type": "boolean" },
         "extractor_version": { "type": "string" },
         "llm_used": { "type": "boolean" },
-        "ingested_at": { "type": "string" }
+        "ingested_at": { "type": "string" },
+        "last_reviewed_at": { "type": "string" }
       }
     },
     "field_meta": {

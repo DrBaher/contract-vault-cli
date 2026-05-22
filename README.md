@@ -111,7 +111,8 @@ is idempotent.
 | `due` / `obligations` | Project upcoming actions. `--within 30d\|60d\|90d`, `--format ics\|json\|table`. Emits valid RFC 5545 `.ics`. |
 | `stats` | Portfolio stats: count, total value, expiring soon, by counterparty / governing law. |
 | `verify` | Integrity check: source `sha256` matches + git tree clean. |
-| `review` | Deterministic worklist of fields that are unidentified / LLM-derived / low-confidence (`--threshold`). Never calls an LLM. |
+| `review` | Deterministic worklist of fields that are unidentified / LLM-derived / low-confidence (`--threshold`; `--strict` exits 1 for CI). Never calls an LLM. |
+| `accept <deal> <field>` | Mark a reviewed field as human-verified (`source=manual`), optionally `--value` to correct it; recomputes the calendar for date/term changes. |
 | `demo` | Run the full flow on bundled fixtures (no extract-cli, no LLM). |
 
 ### Global I/O conventions (shared across the suite)
@@ -182,8 +183,14 @@ ones worth a human look — without calling a model:
 
 ```bash
 contract-vault review                       # unidentified / llm-derived / low-confidence fields
-contract-vault find --needs-review --json   # which deals need attention
+contract-vault review --strict               # exit 1 if anything needs review (CI gate)
+contract-vault find --needs-review --json    # which deals need attention
 extract deal.pdf --json --llm | contract-vault ingest -   # improve them at extraction time
+
+# After a human checks a contract, record the verdict (-> source=manual, drops out of review):
+contract-vault accept acme-corp/msa governing_law --value Delaware
+contract-vault accept acme-corp/msa expiration_date --value 2027-01-31   # recomputes the calendar
+contract-vault accept acme-corp/msa value            # accept the current value as verified
 ```
 
 ---

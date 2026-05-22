@@ -6,6 +6,19 @@ All notable changes to **contract-vault** are documented here. The format follow
 semver-meaningful: backward-incompatible record/output changes require a major bump;
 new optional fields are minor additions.
 
+## [0.1.5] - 2026-05-22
+
+### Added — the human-review workflow (close the "verify, not trust" loop)
+- **`accept <deal> <field> [--value V]`** — mark a reviewed field as human-verified
+  (`source=manual`, `confidence=1.0`), optionally overriding its value. Supports the scalar
+  fields (`value`, `governing_law`, `effective_date`, `expiration_date`, `term.length`,
+  `term.auto_renew`, `term.notice_period_days`) and `parties[i]`. Values are typed/parsed
+  per field; changing a date/term field **recomputes the deadline calendar**
+  (renewal_window + expiration/renewal_notice). Commits to the vault. Never calls an LLM.
+  Accepted fields drop out of `review`.
+- **`review --strict`** — exit 1 when any field needs review, for CI gating (like `verify`).
+- record schema: optional `provenance.last_reviewed_at` timestamp, set by `accept`.
+
 ## [0.1.4] - 2026-05-22
 
 ### Added — surfacing provenance ("verify, not trust")
@@ -110,6 +123,7 @@ Initial release: the post-signature management layer of the contract-ops CLI sui
   tests dependency-free; fixtures vendor sample extract JSON so the suite runs offline and
   without extract-cli installed. Property tests use stdlib `random.Random(seed)`.
 
+[0.1.5]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.5
 [0.1.4]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.4
 [0.1.3]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.3
 [0.1.2]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.2

@@ -35,7 +35,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -887,6 +887,73 @@ def provenance_summary(record: JSONObj) -> Dict[str, int]:
     return counts
 
 
+def recompute_schedule(record: JSONObj) -> None:
+    """Recompute term.renewal_window and the derived (expiration/renewal_notice) obligations
+    from the record's current dates/term, preserving text-derived 'obligation' items.
+
+    Mirrors build_record's deterministic derivation; used after a manual edit (`accept`) so
+    the calendar stays correct. (A test asserts it is a no-op on freshly-ingested records.)
+    """
+    term = record.setdefault("term", {})
+    fm = record.get("field_meta", {})
+    exp = parse_date(record.get("expiration_date"))
+    raw_notice = term.get("notice_period_days")
+    notice = raw_notice if isinstance(raw_notice, int) and not isinstance(raw_notice, bool) else None
+    auto = term.get("auto_renew") if isinstance(term.get("auto_renew"), bool) else None
+
+    def meta(name: str) -> Tuple[str, float]:
+        m = fm.get(name, {}) if isinstance(fm, dict) else {}
+        src = str(m.get("source") or SOURCE_NONE) if isinstance(m, dict) else SOURCE_NONE
+        try:
+            conf = float(m.get("confidence", 0.0) or 0.0) if isinstance(m, dict) else 0.0
+        except (TypeError, ValueError):
+            conf = 0.0
+        return src, conf
+
+    exp_src, exp_conf = meta("expiration_date")
+    np_src, np_conf = meta("term.notice_period_days")
+    ar_src, _ar_conf = meta("term.auto_renew")
+
+    rw: Optional[JSONObj] = None
+    if exp is not None and notice is not None:
+        rw = {"deadline": (exp - dt.timedelta(days=notice)).isoformat(), "expiration": exp.isoformat()}
+    term["renewal_window"] = rw
+
+    text_obs = [o for o in record.get("obligations", []) if isinstance(o, dict) and o.get("type") == "obligation"]
+    derived: List[JSONObj] = []
+    if exp is not None:
+        derived.append(
+            {
+                "type": "expiration",
+                "due": exp.isoformat(),
+                "description": "Contract expires.",
+                "source": exp_src if exp_src != SOURCE_NONE else SOURCE_DETERMINISTIC,
+                "confidence": round(exp_conf, 4),
+            }
+        )
+    if rw is not None and notice is not None and exp is not None:
+        ar_note = "auto-renews" if auto else ("does not auto-renew" if auto is False else "renewal terms apply")
+        derived.append(
+            {
+                "type": "renewal_notice",
+                "due": rw["deadline"],
+                "description": f"Notice deadline: {notice} days before expiration ({exp.isoformat()}); contract {ar_note}.",
+                "source": _combine_source(exp_src, np_src, ar_src),
+                "confidence": round(min(exp_conf, np_conf), 4),
+            }
+        )
+    record["obligations"] = derived + text_obs
+
+
+def _parse_bool(raw: str) -> Optional[bool]:
+    t = raw.strip().lower()
+    if t in ("true", "t", "yes", "y", "1"):
+        return True
+    if t in ("false", "f", "no", "n", "0"):
+        return False
+    return None
+
+
 # ---------------------------------------------------------------------------
 # RFC 5545 (.ics) generation -- stdlib only, no dependency
 # ---------------------------------------------------------------------------
@@ -1494,7 +1561,9 @@ def cmd_review(args: argparse.Namespace) -> int:
     records = load_all_records(vault)
     flagged = [(rid, rec, review_flags(rec, threshold)) for rid, _d, rec in records]
     flagged = [t for t in flagged if t[2]]
-    _why(args, "review", f"scanned={len(records)}", f"needs_review={len(flagged)}", f"threshold={threshold}")
+    # --strict makes review a CI gate (exit 1 when anything needs review), like verify.
+    rc = EXIT_FAIL if (flagged and getattr(args, "strict", False)) else EXIT_OK
+    _why(args, "review", f"scanned={len(records)}", f"needs_review={len(flagged)}", f"threshold={threshold}", f"strict={getattr(args, 'strict', False)}")
     if getattr(args, "json", False):
         _emit_json(
             {
@@ -1506,7 +1575,7 @@ def cmd_review(args: argparse.Namespace) -> int:
                 ],
             }
         )
-        return EXIT_OK
+        return rc
     if not flagged:
         _out(_green(f"Nothing needs review (confidence threshold {threshold})."))
         return EXIT_OK
@@ -1514,7 +1583,86 @@ def cmd_review(args: argparse.Namespace) -> int:
         _out(_bold(rid) + _dim(f"  ({len(fl)} field(s))"))
         for f in fl:
             _out(f"   - {f['field']}: {_yellow(', '.join(f['reasons']))}  [{f['source']}, conf {f['confidence']}]")
-    _out(_dim(f"{len(flagged)} deal(s) need review. Improve with `contract-vault ingest <file> --llm` (delegates to extract)."))
+    _out(_dim(f"{len(flagged)} deal(s) need review. Accept a field with `contract-vault accept <deal> <field> [--value V]`, or improve via `ingest --llm`."))
+    return rc
+
+
+# Scalar fields a human can accept/override; map to where they live + how to type a value.
+ACCEPTABLE_FIELDS = {
+    "effective_date", "expiration_date", "governing_law", "value",
+    "term.length", "term.auto_renew", "term.notice_period_days",
+}
+SCHEDULE_FIELDS = {"expiration_date", "term.notice_period_days", "term.auto_renew"}
+
+
+def _apply_value(record: JSONObj, field: str, raw: str) -> None:
+    """Set a scalar field from a human-supplied --value, with the right typing/parsing."""
+    if field == "value":
+        amount, currency = parse_money(raw)
+        record["value"] = {"raw": raw, "amount": amount, "currency": currency}
+    elif field == "governing_law":
+        record["governing_law"] = raw
+    elif field in ("effective_date", "expiration_date"):
+        d = parse_date(raw)
+        if d is None:
+            raise UsageError(f"--value {raw!r} is not a recognizable date for {field}")
+        record[field] = d.isoformat()
+    elif field == "term.length":
+        record.setdefault("term", {})["length"] = raw
+    elif field == "term.auto_renew":
+        b = _parse_bool(raw)
+        if b is None:
+            raise UsageError(f"--value {raw!r} is not a boolean (use true/false) for {field}")
+        record.setdefault("term", {})["auto_renew"] = b
+    elif field == "term.notice_period_days":
+        m = re.search(r"\d+", raw)
+        if not m:
+            raise UsageError(f"--value {raw!r} has no day count for {field}")
+        record.setdefault("term", {})["notice_period_days"] = int(m.group())
+    else:  # pragma: no cover - guarded by ACCEPTABLE_FIELDS
+        raise UsageError(f"--value not supported for field {field!r}")
+
+
+def cmd_accept(args: argparse.Namespace) -> int:
+    """Mark a reviewed field as human-verified (source=manual, confidence=1.0), optionally
+    overriding its value. Recomputes the deadline calendar if a date/term field changes.
+    Deterministic and local -- never calls an LLM."""
+    vault = resolve_vault(args)
+    rid, deal_dir, rec = find_deal(vault, args.deal)
+    field = args.field
+    value = getattr(args, "value", None)
+
+    party_match = re.fullmatch(r"parties\[(\d+)\]", field)
+    if party_match:
+        idx = int(party_match.group(1))
+        parties = rec.get("parties", [])
+        if idx >= len(parties) or not isinstance(parties[idx], dict):
+            raise UsageError(f"{rid} has no parties[{idx}]")
+        if value is not None:
+            parties[idx]["name"] = value
+        parties[idx]["source"] = SOURCE_MANUAL
+        parties[idx]["confidence"] = 1.0
+    elif field in ACCEPTABLE_FIELDS:
+        if value is not None:
+            _apply_value(rec, field, value)
+        rec.setdefault("field_meta", {})[field] = {"source": SOURCE_MANUAL, "confidence": 1.0}
+        if field in SCHEDULE_FIELDS:
+            recompute_schedule(rec)
+    else:
+        raise UsageError(
+            f"unknown field {field!r}; acceptable: " + ", ".join(sorted(ACCEPTABLE_FIELDS)) + ", parties[i]"
+        )
+
+    rec.setdefault("provenance", {})["last_reviewed_at"] = _now_iso()
+    (deal_dir / RECORD_FILENAME).write_text(_dump_json(rec), encoding="utf-8")
+    git_commit(vault, f"review: accept {rid} {field}" + (f" = {value}" if value is not None else ""), paths=[deal_dir])
+    _why(args, "accept", f"deal={rid}", f"field={field}", f"value={value}", f"schedule_recomputed={field in SCHEDULE_FIELDS and party_match is None}")
+    remaining = len(review_flags(rec))
+    if getattr(args, "json", False):
+        _emit_json({"deal": rid, "field": field, "value": value, "marked": "manual", "remaining_flags": remaining})
+    else:
+        what = f" = {value}" if value is not None else " (accepted as-is)"
+        _out(_green(f"Marked {rid} :: {field} as manual{what}") + _dim(f"  ({remaining} field(s) still need review)"))
     return EXIT_OK
 
 
@@ -1560,7 +1708,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
 
 SUBCOMMANDS = [
     "init", "ingest", "list", "get", "show", "find", "search",
-    "due", "obligations", "stats", "verify", "review", "demo",
+    "due", "obligations", "stats", "verify", "review", "accept", "demo",
 ]
 FIND_FLAGS = [
     "--counterparty", "--governing-law", "--currency", "--expiring-before",
@@ -1577,7 +1725,7 @@ def cmd_complete(words: Sequence[str]) -> int:
         candidates: List[str] = []
         if len(words) <= 1:
             candidates = SUBCOMMANDS
-        elif sub in ("get", "show", "verify"):
+        elif sub in ("get", "show", "verify", "accept"):
             try:
                 vault = resolve_vault(argparse.Namespace())
                 candidates = [rid for rid, _d, _r in load_all_records(vault)]
@@ -1752,7 +1900,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_review = sub.add_parser("review", help="list fields needing review (unidentified / llm-derived / low-confidence)")
     _add_common(p_review)
     p_review.add_argument("--threshold", type=float, metavar="C", help=f"confidence threshold (default {REVIEW_THRESHOLD})")
+    p_review.add_argument("--strict", action="store_true", help="exit 1 if any field needs review (CI gate)")
     p_review.set_defaults(func=cmd_review)
+
+    p_accept = sub.add_parser("accept", help="mark a reviewed field as manual (verified), optionally overriding its value")
+    _add_common(p_accept)
+    p_accept.add_argument("deal", help="deal id (path, leaf name, or unique prefix)")
+    p_accept.add_argument("field", help="field to accept, e.g. value, expiration_date, term.auto_renew, parties[1]")
+    p_accept.add_argument("--value", help="override value (otherwise accept the current value as reviewed)")
+    p_accept.set_defaults(func=cmd_accept)
 
     p_demo = sub.add_parser("demo", help="run the full ingest->find->due flow on bundled fixtures")
     _add_common(p_demo)
