@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/DrBaher/contract-vault/blob/main/docs/spec/contract-record.schema.json",
+  "$id": "https://github.com/DrBaher/contract-vault-cli/blob/main/docs/spec/contract-record.schema.json",
   "title": "contract-vault record schema (v1)",
   "description": "A single executed-deal entry: <vault>/<counterparty>/<name>/record.json. Built by `contract-vault ingest` from extract-cli output. Every value carries provenance via field_meta and per-item source/confidence; downstream treats data as 'verify, not trust'. source is one of {deterministic, llm, manual, none} where 'manual' marks human edits.",
   "type": "object",

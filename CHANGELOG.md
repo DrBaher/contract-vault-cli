@@ -56,4 +56,4 @@ Initial release: the post-signature management layer of the contract-ops CLI sui
   tests dependency-free; fixtures vendor sample extract JSON so the suite runs offline and
   without extract-cli installed. Property tests use stdlib `random.Random(seed)`.
 
-[0.1.0]: https://github.com/DrBaher/contract-vault/releases/tag/v0.1.0
+[0.1.0]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.0

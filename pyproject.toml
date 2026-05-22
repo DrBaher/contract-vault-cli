@@ -58,9 +58,9 @@ contract-vault = "contract_vault_cli:main"
 
 [project.urls]
 Homepage = "https://cli.drbaher.com"
-Repository = "https://github.com/DrBaher/contract-vault"
+Repository = "https://github.com/DrBaher/contract-vault-cli"
 Suite = "https://github.com/DrBaher"
-Changelog = "https://github.com/DrBaher/contract-vault/blob/main/CHANGELOG.md"
+Changelog = "https://github.com/DrBaher/contract-vault-cli/blob/main/CHANGELOG.md"
 
 # Single-module project: ship contract_vault_cli.py explicitly (the module name does
 # not match the normalized distribution name, so hatchling cannot auto-detect it).

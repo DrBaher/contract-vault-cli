@@ -6,7 +6,7 @@ suite](https://github.com/DrBaher) and follows its shared conventions.
 ## Development setup
 
 ```bash
-git clone https://github.com/DrBaher/contract-vault
+git clone https://github.com/DrBaher/contract-vault-cli
 cd contract-vault
 make install        # editable install with dev extras (pytest, coverage, mypy, build)
 make test           # full suite
