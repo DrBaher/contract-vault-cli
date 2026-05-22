@@ -43,6 +43,7 @@ contract-vault verify               # integrity check (source sha256 + git state
 contract-vault review [--strict]    # list fields needing review (unidentified / llm / low-confidence)
 contract-vault accept <deal> <field>  # mark a reviewed field as manual (verified); bulk via --from
 contract-vault obligation <deal> <id> # track an obligation: --status open|done|waived, --owner, --recurrence, --reminders
+contract-vault remind [--strict]    # obligations whose reminder window is open now (cron/agent digest)
 contract-vault history <deal>       # git history (ingest + each accept)
 contract-vault demo                 # full ingest->find->due flow on bundled fixtures
 ```

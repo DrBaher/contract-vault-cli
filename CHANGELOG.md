@@ -6,6 +6,16 @@ All notable changes to **contract-vault** are documented here. The format follow
 semver-meaningful: backward-incompatible record/output changes require a major bump;
 new optional fields are minor additions.
 
+## [0.3.1] - 2026-05-22
+
+### Added
+- **`remind` command** — the reminder digest: obligations whose reminder window is open
+  right now (`0 <= days_until <= the obligation's longest reminder lead`), honoring
+  per-obligation `--reminders`. Built for cron/agents — `contract-vault remind --strict
+  --json` daily emits exactly what to notify about (exit 1 when anything is due, for
+  gating). Supports `--as-of`, `--status`/`--type`/`--owner`, and `--format ics|json|table`.
+  No schema change.
+
 ## [0.3.0] - 2026-05-22
 
 ### Added — recurring obligations + per-obligation reminders
@@ -204,6 +214,7 @@ Initial release: the post-signature management layer of the contract-ops CLI sui
   tests dependency-free; fixtures vendor sample extract JSON so the suite runs offline and
   without extract-cli installed. Property tests use stdlib `random.Random(seed)`.
 
+[0.3.1]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.3.1
 [0.3.0]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.3.0
 [0.2.0]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.2.0
 [0.1.8]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.8

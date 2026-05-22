@@ -20,7 +20,7 @@ use it.
 - **Default**: human-readable tables/text on **stdout**, exit `0`.
 - **Machine-readable**: pass **`--json`** for structured stdout on the read
   commands (`list`, `find`/`search`, `get`/`show`, `stats`, `review`, `risk`,
-  `verify`, `history`). `due`/`obligations` and `export` take a richer
+  `remind`, `verify`, `history`). `due`/`obligations` and `export` take a richer
   **`--format`**: `due --format ics|json|table` (ICS calendar feed), `export
   --format csv|md|json`. `--json` forces JSON where a `--format` also exists.
 - **Write commands** mutate the vault and commit: `ingest`, `accept <deal> <field>`

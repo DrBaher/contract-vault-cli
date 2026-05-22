@@ -2,10 +2,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/DrBaher/contract-vault-cli/blob/main/docs/spec/obligations-output.schema.json",
   "title": "contract-vault obligations (`due --format json`) output schema (v1)",
-  "description": "Machine-readable projection of upcoming, dated obligations across the whole vault, produced by `contract-vault due --format json` (and `obligations`). Doubles as the reminder manifest: each row carries days_until and a suggested lead_days. The .ics output (`--format ics`) is the same data rendered as RFC 5545.",
+  "description": "Machine-readable projection of upcoming, dated obligations across the whole vault, produced by `contract-vault due --format json` (and `obligations`), and by `remind --format json` (which omits within_days). Doubles as the reminder manifest: each row carries days_until, reminders, and a suggested lead_days. The .ics output (`--format ics`) is the same data rendered as RFC 5545.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["generated_at", "as_of", "within_days", "count", "obligations"],
+  "required": ["generated_at", "as_of", "count", "obligations"],
   "$defs": {
     "source": {
       "enum": ["deterministic", "llm", "manual", "none"]

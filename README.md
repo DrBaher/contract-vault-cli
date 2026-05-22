@@ -138,6 +138,7 @@ is idempotent.
 | `review` | Deterministic worklist of fields that are unidentified / LLM-derived / low-confidence (`--threshold`; `--strict` exits 1 for CI). Never calls an LLM. |
 | `accept <deal> <field>` | Mark a reviewed field as human-verified (`source=manual`), optionally `--value` to correct it; recomputes the calendar for date/term changes. Bulk via `accept --from FILE`. |
 | `risk` / `at-risk` | Renewal exposure: **missed** notice deadlines (CRITICAL if auto-renewing), imminent notices, and expirations (`--within`, `--strict`). |
+| `remind` | The reminder digest: obligations whose reminder window is open right now (honors per-obligation `--reminders`). For cron/agents (`--strict`, `--format`). |
 | `history <deal>` | The deal's git history (ingest + each accept). |
 | `demo` | Run the full flow on bundled fixtures (no extract-cli, no LLM). |
 
@@ -176,6 +177,35 @@ contract-vault due --within 365d --format json > reminders.json
 `--format json` (or `--json`) for `due`/`obligations` doubles as a **reminder manifest**:
 each row carries `days_until` and a suggested `lead_days`. The `.ics` output is the same
 data rendered as RFC 5545, with a `VALARM` per event.
+
+---
+
+## Notifications & reminders
+
+contract-vault has **no daemon and sends no notifications itself** — it computes deadlines
+and lead-times deterministically; *delivery is your environment's job*. There are three
+ways to actually get notified:
+
+1. **Calendar (zero code).** `contract-vault due --within 365d --format ics > contracts.ics`
+   and subscribe to it. Each event carries `VALARM`s (`TRIGGER:-P30D`, …) from the
+   per-obligation `--reminders`, so your calendar app fires the alerts natively.
+2. **Cron / CI gate.** Run on a schedule and act on the **exit code** or piped JSON —
+   e.g. `contract-vault remind --strict || mail-me` (exit 1 when something is due), or
+   `contract-vault risk --within 30d --strict`.
+3. **An agent (Claude, etc.).** The agent polls the CLI and notifies through its own
+   channel. contract-vault is built for this (`--catalog json`, `--json`, exit codes,
+   [`AGENTS.md`](AGENTS.md)).
+
+The **`remind`** command is the turnkey digest — "what should I be notified about *now*":
+
+```bash
+contract-vault remind                 # obligations whose reminder window is open today
+contract-vault remind --strict --json # exit 1 + JSON if anything is due (cron/agent loop)
+```
+
+It returns each obligation only while `0 ≤ days_until ≤ its longest reminder lead`, honoring
+`obligation <deal> <id> --reminders 30,7`. A daily `remind --json` is exactly the set a
+notifier should send.
 
 ---
 

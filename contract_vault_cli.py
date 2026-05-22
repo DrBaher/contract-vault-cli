@@ -41,7 +41,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -898,12 +898,16 @@ def upcoming_obligations(
     statuses: Optional[Sequence[str]] = None,
     type_filter: Optional[str] = None,
     owner_filter: Optional[str] = None,
+    remind_only: bool = False,
 ) -> List[JSONObj]:
     """Project dated obligations across all deals into actions within the window.
 
     By default only OPEN obligations are projected (so completing one drops it from the
     calendar); pass statuses=("open","done","waived") or None-with-all to widen. Missing
     status is treated as 'open' for backward compatibility with pre-0.2.0 records.
+
+    With remind_only, `within_days` is ignored and each obligation is included only when a
+    reminder is currently active -- i.e. `0 <= days_until <= max(its reminders)`.
     """
     include = set(statuses) if statuses else {"open"}
     horizon = as_of + dt.timedelta(days=within_days)
@@ -921,14 +925,16 @@ def upcoming_obligations(
             anchor = parse_date(ob.get("due"))
             if anchor is None:
                 continue  # dateless obligation: tracked, but no calendar entry
+            reminders = obligation_reminders(ob)
+            # remind_only: each obligation's own reminder window; else the shared horizon.
+            end = (as_of + dt.timedelta(days=max(reminders))) if remind_only else horizon
             freq = ob.get("recurrence") if ob.get("recurrence") in RECURRENCE_FREQS else None
             if freq:
                 # Recurring: expand into occurrences, capped at the contract's expiration.
-                cap_end = min(horizon, exp_cap) if exp_cap else horizon
+                cap_end = min(end, exp_cap) if exp_cap else end
                 occurrences = recurrence_occurrences(anchor, str(freq), as_of, cap_end)
             else:
-                occurrences = [anchor] if as_of <= anchor <= horizon else []
-            reminders = obligation_reminders(ob)
+                occurrences = [anchor] if as_of <= anchor <= end else []
             for due in occurrences:
                 rows.append(
                     {
@@ -954,6 +960,14 @@ def upcoming_obligations(
 
 def _suggest_lead_days(ob_type: str) -> int:
     return {"renewal_notice": 14, "expiration": 30, "obligation": 7}.get(ob_type, 7)
+
+
+def _obligation_line(r: JSONObj) -> str:
+    """One human-readable line for an upcoming-obligation row (shared by `due`/`remind`)."""
+    when = _yellow(str(r["due"])) if r["days_until"] <= 14 else str(r["due"])
+    owner = f"  @{r['owner']}" if r.get("owner") else ""
+    recur = _dim(f" (every {r['recurrence']})") if r.get("recurrence") else ""
+    return f"  {_dim(str(r['id']))}  {when}  (+{r['days_until']}d)  {_bold(str(r['type']))}{recur}  {r['counterparty']}{owner}  -- {r['description']}"
 
 
 def primary_counterparty(record: JSONObj) -> str:
@@ -1595,11 +1609,44 @@ def cmd_due(args: argparse.Namespace) -> int:
         return EXIT_OK
     _out(_bold(f"Upcoming obligations within {within} days (as of {as_of.isoformat()}):"))
     for r in rows:
-        when = _yellow(r["due"]) if r["days_until"] <= 14 else r["due"]
-        owner = f"  @{r['owner']}" if r.get("owner") else ""
-        recur = _dim(f" (every {r['recurrence']})") if r.get("recurrence") else ""
-        _out(f"  {_dim(str(r['id']))}  {when}  (+{r['days_until']}d)  {_bold(str(r['type']))}{recur}  {r['counterparty']}{owner}  -- {r['description']}")
+        _out(_obligation_line(r))
     return EXIT_OK
+
+
+def cmd_remind(args: argparse.Namespace) -> int:
+    """Obligations whose reminder window is open right now (0 <= days_until <= its longest
+    lead). The reminder digest for cron/agents: `contract-vault remind --strict --json`
+    daily emits exactly what to notify about. Deterministic; never calls an LLM."""
+    vault = resolve_vault(args)
+    as_of = parse_date(args.as_of) if getattr(args, "as_of", None) else dt.date.today()
+    if getattr(args, "as_of", None) and as_of is None:
+        raise UsageError(f"invalid --as-of date: {args.as_of!r}")
+    assert as_of is not None
+    status_arg = getattr(args, "status", None) or "open"
+    statuses = list(OBLIGATION_STATUSES) if status_arg == "all" else [status_arg]
+    rows = upcoming_obligations(
+        vault, within_days=0, as_of=as_of, statuses=statuses,
+        type_filter=getattr(args, "type", None), owner_filter=getattr(args, "owner", None),
+        remind_only=True,
+    )
+    rc = EXIT_FAIL if (rows and getattr(args, "strict", False)) else EXIT_OK
+    fmt = getattr(args, "format", None) or ("json" if getattr(args, "json", False) else "table")
+    if getattr(args, "json", False):
+        fmt = "json"
+    _why(args, "remind", f"as_of={as_of.isoformat()}", f"due_now={len(rows)}", f"strict={getattr(args, 'strict', False)}", f"format={fmt}")
+    if fmt == "ics":
+        sys.stdout.write(build_ics(rows))
+        return rc
+    if fmt == "json":
+        _emit_json({"generated_at": _now_iso(), "as_of": as_of.isoformat(), "count": len(rows), "obligations": rows})
+        return rc
+    if not rows:
+        _out(_green(f"No reminders due as of {as_of.isoformat()}."))
+        return EXIT_OK
+    _out(_bold(f"Reminders due as of {as_of.isoformat()} ({len(rows)}):"))
+    for r in rows:
+        _out(_obligation_line(r))
+    return rc
 
 
 def cmd_stats(args: argparse.Namespace) -> int:
@@ -2203,7 +2250,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
 SUBCOMMANDS = [
     "init", "ingest", "list", "get", "show", "find", "search",
     "due", "obligations", "stats", "verify", "review", "accept", "export",
-    "risk", "history", "obligation", "demo",
+    "risk", "history", "obligation", "remind", "demo",
 ]
 FIND_FLAGS = [
     "--counterparty", "--governing-law", "--currency", "--expiring-before",
@@ -2385,6 +2432,16 @@ def build_parser() -> argparse.ArgumentParser:
         p_due.add_argument("--type", help="filter by obligation type (expiration|renewal_notice|obligation)")
         p_due.add_argument("--owner", help="filter by assigned owner")
         p_due.set_defaults(func=cmd_due)
+
+    p_remind = sub.add_parser("remind", help="obligations whose reminder window is open right now (digest for cron/agents)")
+    _add_common(p_remind)
+    p_remind.add_argument("--as-of", dest="as_of", metavar="DATE", help="reference 'today' (default: actual today)")
+    p_remind.add_argument("--format", choices=["ics", "json", "table"], help="output format (default table; --json forces json)")
+    p_remind.add_argument("--status", choices=["open", "done", "waived", "all"], help="filter by status (default: open)")
+    p_remind.add_argument("--type", help="filter by obligation type")
+    p_remind.add_argument("--owner", help="filter by assigned owner")
+    p_remind.add_argument("--strict", action="store_true", help="exit 1 if any reminder is due (for cron/agent gating)")
+    p_remind.set_defaults(func=cmd_remind)
 
     p_stats = sub.add_parser("stats", help="portfolio statistics")
     _add_common(p_stats)
