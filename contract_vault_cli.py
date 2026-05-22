@@ -35,7 +35,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -280,35 +280,74 @@ def parse_date(value: Any) -> Optional[dt.date]:
     return None
 
 
-def scan_date(text: str) -> Optional[dt.date]:
-    """Find the first recognizable date anywhere inside free text (for obligations)."""
-    for rx, order in (
-        (_ISO_DATE_RE, ("y", "m", "d")),
-        (_MONTH_NAME_RE, ("mon", "d", "y")),
-        (_DAY_MONTH_RE, ("d", "mon", "y")),
-    ):
-        m = rx.search(text)
-        if not m:
-            continue
+# Stricter ISO matcher for scanning free text: rejects dates embedded in a larger token
+# (e.g. the "2026-07-15" inside "invoice-2026-07-15-A") by forbidding adjacent digits / - / /.
+_SCAN_ISO_RE = re.compile(r"(?<![\d/-])(\d{4})-(\d{2})-(\d{2})(?![\d/-])")
+
+
+def scan_dates(text: str) -> List[dt.date]:
+    """All recognizable dates in free text, in order of appearance, de-duplicated.
+
+    Turns obligation prose into deadlines; a clause naming two dates yields two.
+    """
+    found: List[Tuple[int, dt.date]] = []
+
+    def add(pos: int, y: int, mo: int, d: int) -> None:
         try:
-            if order[0] == "y":
-                return dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-            if order == ("mon", "d", "y"):
-                mon = _MONTHS.get(m.group(1).lower())
-                if mon:
-                    return dt.date(int(m.group(3)), mon, int(m.group(2)))
-            if order == ("d", "mon", "y"):
-                mon = _MONTHS.get(m.group(2).lower())
-                if mon:
-                    return dt.date(int(m.group(3)), mon, int(m.group(1)))
+            found.append((pos, dt.date(y, mo, d)))
         except ValueError:
-            continue
-    return None
+            pass
+
+    for m in _SCAN_ISO_RE.finditer(text):
+        add(m.start(), int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    for m in _MONTH_NAME_RE.finditer(text):
+        mon = _MONTHS.get(m.group(1).lower())
+        if mon:
+            add(m.start(), int(m.group(3)), mon, int(m.group(2)))
+    for m in _DAY_MONTH_RE.finditer(text):
+        mon = _MONTHS.get(m.group(2).lower())
+        if mon:
+            add(m.start(), int(m.group(3)), mon, int(m.group(1)))
+    out: List[dt.date] = []
+    for _pos, d in sorted(found, key=lambda t: t[0]):
+        if d not in out:
+            out.append(d)
+    return out
+
+
+def scan_date(text: str) -> Optional[dt.date]:
+    """First recognizable date in free text (None if none)."""
+    ds = scan_dates(text)
+    return ds[0] if ds else None
 
 
 _CURRENCY_SYMBOLS = {"$": "USD", "€": "EUR", "£": "GBP", "¥": "JPY"}
 _CURRENCY_CODES = {"USD", "EUR", "GBP", "JPY", "CAD", "AUD", "CHF", "CNY", "INR"}
-_MONEY_NUM_RE = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*([kKmMbB][nN]?)?")
+_MONEY_NUM_RE = re.compile(r"(\d[\d.,]*)\s*([kKmMbB][nN]?)?")
+
+
+def _normalize_number(s: str) -> str:
+    """Normalize a US- or European-grouped numeric string to a float-parseable form.
+
+    The decimal separator is inferred from context: when both ',' and '.' appear, the
+    rightmost is decimal; a lone ',' or '.' with 1-2 trailing digits is decimal, else a
+    thousands separator. So '1,234.56'->'1234.56' and '1.000.000,50'->'1000000.50'.
+    """
+    s = s.strip().strip(".,")
+    has_c, has_d = "," in s, "." in s
+    if has_c and has_d:
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif has_c:
+        parts = s.split(",")
+        s = s.replace(",", ".") if len(parts) == 2 and 1 <= len(parts[1]) <= 2 else s.replace(",", "")
+    elif has_d:
+        parts = s.split(".")
+        if not (len(parts) == 2 and 1 <= len(parts[1]) <= 2):
+            s = s.replace(".", "")
+    return s
 
 
 def parse_money(value: Any) -> Tuple[Optional[float], Optional[str]]:
@@ -348,7 +387,7 @@ def parse_money(value: Any) -> Tuple[Optional[float], Optional[str]]:
     if not m:
         return None, currency
     try:
-        amount = float(m.group(1).replace(",", ""))
+        amount = float(_normalize_number(m.group(1)))
     except ValueError:
         return None, currency
     suffix = (m.group(2) or "").lower()
@@ -358,6 +397,11 @@ def parse_money(value: Any) -> Tuple[Optional[float], Optional[str]]:
         amount *= 1_000_000
     elif suffix.startswith("b"):
         amount *= 1_000_000_000
+    first_digit = re.search(r"\d", text)
+    if (first_digit is not None and "-" in text[: first_digit.start()]) or (
+        text.startswith("(") and text.endswith(")")
+    ):
+        amount = -amount  # leading minus or accounting parentheses -> negative
     return amount, currency
 
 
@@ -663,16 +707,20 @@ def build_record(
             oconf = float(ob.get("confidence", 0.0) or 0.0)
         except (TypeError, ValueError):
             oconf = 0.0
-        due = scan_date(text)
-        obligations.append(
-            {
-                "type": "obligation",
-                "due": due.isoformat() if due else None,
-                "description": text,
-                "source": str(ob.get("source", SOURCE_NONE) or SOURCE_NONE),
-                "confidence": round(oconf, 4),
-            }
-        )
+        ob_src = str(ob.get("source", SOURCE_NONE) or SOURCE_NONE)
+        ob_dues: List[Optional[dt.date]] = [d for d in scan_dates(text)]
+        if not ob_dues:
+            ob_dues = [None]  # dateless obligation: still recorded, just no deadline
+        for due in ob_dues:
+            obligations.append(
+                {
+                    "type": "obligation",
+                    "due": due.isoformat() if due else None,
+                    "description": text,
+                    "source": ob_src,
+                    "confidence": round(oconf, 4),
+                }
+            )
 
     # Provenance ------------------------------------------------------------
     meta = payload.get("_meta", {}) or {}

@@ -6,6 +6,19 @@ All notable changes to **contract-vault** are documented here. The format follow
 semver-meaningful: backward-incompatible record/output changes require a major bump;
 new optional fields are minor additions.
 
+## [0.1.3] - 2026-05-22
+
+### Changed (parsing robustness — hardening the limitations surfaced by the stress test)
+- **Locale-aware number parsing.** `value` amounts now understand European grouping:
+  the decimal separator is inferred from context, so `1.000.000,50` → `1000000.50` and
+  `1,234.56` → `1234.56` (US grouping like `$120,000` is unchanged).
+- **Negative / accounting values.** A leading `-` or surrounding parentheses now yield a
+  negative amount (`-$50,000` and `($50,000)` → `-50000`).
+- **Multiple obligation dates.** An obligation clause naming several dates now produces
+  one deadline per date (e.g. "pay 50% by A and the remainder by B" → two `due` items).
+- **Stricter obligation date scanning.** Dates embedded in larger tokens are no longer
+  misread as deadlines (e.g. the `2026-07-15` in `invoice-2026-07-15-A` is ignored).
+
 ## [0.1.2] - 2026-05-22
 
 ### Fixed
@@ -79,6 +92,7 @@ Initial release: the post-signature management layer of the contract-ops CLI sui
   tests dependency-free; fixtures vendor sample extract JSON so the suite runs offline and
   without extract-cli installed. Property tests use stdlib `random.Random(seed)`.
 
+[0.1.3]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.3
 [0.1.2]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.2
 [0.1.1]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.1
 [0.1.0]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.0
