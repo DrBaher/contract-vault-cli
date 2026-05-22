@@ -35,7 +35,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -1153,6 +1153,14 @@ def cmd_find(args: argparse.Namespace) -> int:
             exp = parse_date(rec.get("expiration_date"))
             if exp is None or exp >= exp_before:
                 continue
+        if getattr(args, "currency", None):
+            want = args.currency.strip().lower()
+            cur = rec.get("value", {}).get("currency")
+            if want in ("none", "unknown", "null", "-"):
+                if cur is not None:
+                    continue
+            elif str(cur or "").lower() != want:
+                continue
         if getattr(args, "value_gt", None) is not None:
             amount = rec.get("value", {}).get("amount")
             if not isinstance(amount, (int, float)) or amount <= args.value_gt:
@@ -1174,6 +1182,7 @@ def cmd_find(args: argparse.Namespace) -> int:
             for k, v in (
                 ("counterparty", args.counterparty),
                 ("governing_law", args.governing_law),
+                ("currency", getattr(args, "currency", None)),
                 ("expiring_before", getattr(args, "expiring_before", None)),
                 ("value_gt", getattr(args, "value_gt", None)),
                 ("auto_renew", getattr(args, "auto_renew", False)),
@@ -1207,7 +1216,14 @@ def cmd_find(args: argparse.Namespace) -> int:
         _out(_dim("(no matches)"))
         return EXIT_OK
     for rid, _d, rec in results:
-        _out(f"{_bold(rid)}  exp {rec.get('expiration_date') or '-'}  law {rec.get('governing_law') or '-'}")
+        val = rec.get("value", {})
+        amt = val.get("amount")
+        money = (
+            f"{amt:,.0f} {val.get('currency') or '?'}"
+            if isinstance(amt, (int, float)) and not isinstance(amt, bool)
+            else "-"
+        )
+        _out(f"{_bold(rid)}  exp {rec.get('expiration_date') or '-'}  val {money}  law {rec.get('governing_law') or '-'}")
     return EXIT_OK
 
 
@@ -1381,7 +1397,7 @@ SUBCOMMANDS = [
     "due", "obligations", "stats", "verify", "demo",
 ]
 FIND_FLAGS = [
-    "--counterparty", "--governing-law", "--expiring-before",
+    "--counterparty", "--governing-law", "--currency", "--expiring-before",
     "--value-gt", "--auto-renew", "--text", "--json",
 ]
 
@@ -1543,8 +1559,9 @@ def build_parser() -> argparse.ArgumentParser:
         p_find.add_argument("text", nargs="?", help="full-text query")
         p_find.add_argument("--counterparty", help="match counterparty / party name")
         p_find.add_argument("--governing-law", dest="governing_law", help="match governing law")
+        p_find.add_argument("--currency", help="match value currency, e.g. USD/EUR/GBP (or 'none' for unpriced); pair with --value-gt for currency-aware thresholds")
         p_find.add_argument("--expiring-before", dest="expiring_before", metavar="DATE", help="expiration date before DATE")
-        p_find.add_argument("--value-gt", dest="value_gt", type=float, metavar="N", help="value amount greater than N")
+        p_find.add_argument("--value-gt", dest="value_gt", type=float, metavar="N", help="value amount greater than N (compare within a currency by adding --currency)")
         p_find.add_argument("--auto-renew", dest="auto_renew", action="store_true", help="only auto-renewing deals")
         p_find.set_defaults(func=cmd_find)
 

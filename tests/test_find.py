@@ -53,6 +53,33 @@ def test_find_full_text(loaded_vault: Path, capsys: pytest.CaptureFixture[str]) 
     assert {d["id"] for d in deals} == {"soylent-systems/soylent-saas"}
 
 
+def test_find_by_currency(loaded_vault: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # acme="$120,000"->USD, umbrella="£2,400,000"->GBP, soylent=50000(bare)->null, initech=null->null
+    assert {d["id"] for d in _find(loaded_vault, "--currency", "GBP", capsys=capsys)} == {
+        "umbrella-corp/commercial-lease-agreement"
+    }
+    assert {d["id"] for d in _find(loaded_vault, "--currency", "usd", capsys=capsys)} == {
+        "acme-corporation/master-services-agreement"
+    }  # case-insensitive
+    assert _find(loaded_vault, "--currency", "EUR", capsys=capsys) == []
+
+
+def test_find_currency_none_matches_unpriced(loaded_vault: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    ids = {d["id"] for d in _find(loaded_vault, "--currency", "none", capsys=capsys)}
+    assert ids == {
+        "soylent-systems/soylent-saas",          # bare number 50000, no currency
+        "initech-inc/mutual-non-disclosure-agreement",  # no value at all
+    }
+
+
+def test_find_currency_aware_value_threshold(loaded_vault: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # currency-aware: USD deals over 100k USD -> acme (120k); raise the bar past it -> none
+    assert {d["id"] for d in _find(loaded_vault, "--currency", "USD", "--value-gt", "100000", capsys=capsys)} == {
+        "acme-corporation/master-services-agreement"
+    }
+    assert _find(loaded_vault, "--currency", "USD", "--value-gt", "200000", capsys=capsys) == []
+
+
 def test_find_combined_filters(loaded_vault: Path, capsys: pytest.CaptureFixture[str]) -> None:
     deals = _find(loaded_vault, "--auto-renew", "--value-gt", "100000", capsys=capsys)
     assert {d["id"] for d in deals} == {

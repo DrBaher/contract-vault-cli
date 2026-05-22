@@ -6,6 +6,19 @@ All notable changes to **contract-vault** are documented here. The format follow
 semver-meaningful: backward-incompatible record/output changes require a major bump;
 new optional fields are minor additions.
 
+## [0.1.1] - 2026-05-22
+
+### Added
+- `find --currency CCC` — filter deals by their value currency (case-insensitive;
+  `none`/`unknown` matches unpriced/bare-number deals). Pairing it with `--value-gt`
+  makes value thresholds **currency-aware** (e.g. `find --currency GBP --value-gt 1000000`),
+  addressing the fact that `--value-gt` alone compares raw amounts across currencies.
+  Deterministic and offline — no FX rates or conversion (currency is never guessed).
+
+### Changed
+- `find` human output now shows each deal's value + currency alongside expiration and
+  governing law.
+
 ## [0.1.0] - 2026-05-22
 
 Initial release: the post-signature management layer of the contract-ops CLI suite.
@@ -56,4 +69,5 @@ Initial release: the post-signature management layer of the contract-ops CLI sui
   tests dependency-free; fixtures vendor sample extract JSON so the suite runs offline and
   without extract-cli installed. Property tests use stdlib `random.Random(seed)`.
 
+[0.1.1]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.1
 [0.1.0]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.0

@@ -107,7 +107,7 @@ is idempotent.
 | `ingest -` | Read piped extract JSON from stdin (`extract f --json \| contract-vault ingest -`). |
 | `list` | List stored deals. |
 | `get <id>` / `show <id>` | Print one record (by path, leaf name, or unique prefix). |
-| `find` / `search` | Query by `--counterparty`, `--governing-law`, `--expiring-before DATE`, `--value-gt N`, `--auto-renew`, or full-text. |
+| `find` / `search` | Query by `--counterparty`, `--governing-law`, `--currency CCC`, `--expiring-before DATE`, `--value-gt N`, `--auto-renew`, or full-text. Pair `--currency` with `--value-gt` for currency-aware thresholds. |
 | `due` / `obligations` | Project upcoming actions. `--within 30d\|60d\|90d`, `--format ics\|json\|table`. Emits valid RFC 5545 `.ics`. |
 | `stats` | Portfolio stats: count, total value, expiring soon, by counterparty / governing law. |
 | `verify` | Integrity check: source `sha256` matches + git tree clean. |

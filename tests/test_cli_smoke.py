@@ -12,7 +12,7 @@ import contract_vault_cli as cv
 def test_version(capsys: pytest.CaptureFixture[str]) -> None:
     rc = cv.main(["--version"])
     assert rc == 0
-    assert "contract-vault 0.1.0" in capsys.readouterr().out
+    assert f"contract-vault {cv.__version__}" in capsys.readouterr().out
 
 
 def test_no_subcommand_prints_help_and_usage_exit(capsys: pytest.CaptureFixture[str]) -> None:
