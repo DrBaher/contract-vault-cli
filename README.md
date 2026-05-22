@@ -110,6 +110,7 @@ is idempotent.
 | `find` / `search` | Query by `--counterparty`, `--governing-law`, `--currency CCC`, `--expiring-before DATE`, `--value-gt N`, `--auto-renew`, or full-text. Pair `--currency` with `--value-gt` for currency-aware thresholds. |
 | `due` / `obligations` | Project upcoming actions. `--within 30d\|60d\|90d`, `--format ics\|json\|table`. Emits valid RFC 5545 `.ics`. |
 | `stats` | Portfolio stats: count, total value, expiring soon, by counterparty / governing law. |
+| `export` | Export the register as `csv` / `md` / `json` (`--expiring-before`, `--needs-review`). For spreadsheets & reports. |
 | `verify` | Integrity check: source `sha256` matches + git tree clean. |
 | `review` | Deterministic worklist of fields that are unidentified / LLM-derived / low-confidence (`--threshold`; `--strict` exits 1 for CI). Never calls an LLM. |
 | `accept <deal> <field>` | Mark a reviewed field as human-verified (`source=manual`), optionally `--value` to correct it; recomputes the calendar for date/term changes. |
@@ -134,6 +135,10 @@ extract deal.pdf --json | contract-vault ingest -
 
 # Export the next quarter of renewals/notices to any calendar app.
 contract-vault due --within 90d --format ics > renewals.ics
+
+# Hand the portfolio to finance/legal as a spreadsheet or a report.
+contract-vault export > portfolio.csv
+contract-vault export --format md --expiring-before 2027-01-01 > renewals-report.md
 
 # Pipe the machine-readable register into jq.
 contract-vault find --expiring-before 2026-01-01 --json | jq '.deals[].id'

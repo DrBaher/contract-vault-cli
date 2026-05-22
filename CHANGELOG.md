@@ -6,6 +6,16 @@ All notable changes to **contract-vault** are documented here. The format follow
 semver-meaningful: backward-incompatible record/output changes require a major bump;
 new optional fields are minor additions.
 
+## [0.1.6] - 2026-05-22
+
+### Added
+- **`export` command** — emit the register as **csv** (default; opens in any spreadsheet),
+  **md** (a shareable report with a value summary), or **json**. One flat row per deal:
+  counterparty, dates, auto-renew, notice, renewal deadline, governing law, value
+  (amount + currency), next upcoming obligation, needs-review count, vaulted. Filter with
+  `--expiring-before DATE` and `--needs-review`. Composable:
+  `contract-vault export > portfolio.csv`. Deterministic, stdlib `csv` only.
+
 ## [0.1.5] - 2026-05-22
 
 ### Added — the human-review workflow (close the "verify, not trust" loop)
@@ -123,6 +133,7 @@ Initial release: the post-signature management layer of the contract-ops CLI sui
   tests dependency-free; fixtures vendor sample extract JSON so the suite runs offline and
   without extract-cli installed. Property tests use stdlib `random.Random(seed)`.
 
+[0.1.6]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.6
 [0.1.5]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.5
 [0.1.4]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.4
 [0.1.3]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.3

@@ -24,8 +24,10 @@ logic is purely deterministic and works fully with the LLM off.
 from __future__ import annotations
 
 import argparse
+import csv
 import datetime as dt
 import hashlib
+import io
 import json
 import os
 import re
@@ -35,7 +37,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
-__version__ = "0.1.5"
+__version__ = "0.1.6"
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -1519,6 +1521,107 @@ def cmd_stats(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+EXPORT_COLUMNS = [
+    "id", "counterparty", "title", "status", "effective_date", "expiration_date",
+    "auto_renew", "notice_period_days", "renewal_deadline", "governing_law",
+    "value_amount", "value_currency", "next_due", "needs_review", "vaulted",
+]
+
+
+def export_rows(records: List[Tuple[str, Path, JSONObj]], as_of: dt.date) -> List[JSONObj]:
+    """One flat reporting row per deal (the basis for csv/md/json export)."""
+    rows: List[JSONObj] = []
+    for rid, _d, rec in records:
+        term = rec.get("term", {}) or {}
+        rw = term.get("renewal_window") or {}
+        val = rec.get("value", {}) or {}
+        upcoming = sorted(
+            d for d in (parse_date(o.get("due")) for o in rec.get("obligations", []))
+            if d is not None and d >= as_of
+        )
+        rows.append(
+            {
+                "id": rid,
+                "counterparty": primary_counterparty(rec),
+                "title": rec.get("title") or "",
+                "status": rec.get("status") or "",
+                "effective_date": rec.get("effective_date") or "",
+                "expiration_date": rec.get("expiration_date") or "",
+                "auto_renew": term.get("auto_renew"),
+                "notice_period_days": term.get("notice_period_days"),
+                "renewal_deadline": rw.get("deadline", ""),
+                "governing_law": rec.get("governing_law") or "",
+                "value_amount": val.get("amount"),
+                "value_currency": val.get("currency") or "",
+                "next_due": upcoming[0].isoformat() if upcoming else "",
+                "needs_review": len(review_flags(rec)),
+                "vaulted": bool(rec.get("source", {}).get("vaulted", False)),
+            }
+        )
+    return rows
+
+
+def _cell(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _markdown_report(rows: List[JSONObj], totals: Dict[str, float]) -> str:
+    out = io.StringIO()
+    out.write(f"# Contract portfolio ({len(rows)} deal(s))\n\n")
+    if totals:
+        out.write("**Total value:** " + ", ".join(f"{round(v, 2):,} {k}" for k, v in sorted(totals.items())) + "\n\n")
+    out.write("| " + " | ".join(EXPORT_COLUMNS) + " |\n")
+    out.write("|" + "|".join("---" for _ in EXPORT_COLUMNS) + "|\n")
+    for r in rows:
+        out.write("| " + " | ".join(_cell(r[c]).replace("|", "\\|") for c in EXPORT_COLUMNS) + " |\n")
+    return out.getvalue()
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    """Export the register as csv | md | json for stakeholders / spreadsheets / reports."""
+    vault = resolve_vault(args)
+    as_of = dt.date.today()
+    exp_before = parse_date(args.expiring_before) if getattr(args, "expiring_before", None) else None
+    if getattr(args, "expiring_before", None) and exp_before is None:
+        raise UsageError(f"invalid --expiring-before date: {args.expiring_before!r}")
+    selected: List[Tuple[str, Path, JSONObj]] = []
+    for rid, d, rec in load_all_records(vault):
+        if exp_before is not None:
+            e = parse_date(rec.get("expiration_date"))
+            if e is None or e >= exp_before:
+                continue
+        if getattr(args, "needs_review", False) and not review_flags(rec):
+            continue
+        selected.append((rid, d, rec))
+    rows = export_rows(selected, as_of)
+    fmt = getattr(args, "format", None) or ("json" if getattr(args, "json", False) else "csv")
+    if getattr(args, "json", False):
+        fmt = "json"
+    _why(args, "export", f"deals={len(rows)}", f"format={fmt}")
+    if fmt == "json":
+        _emit_json({"generated_at": _now_iso(), "count": len(rows), "columns": EXPORT_COLUMNS, "deals": rows})
+        return EXIT_OK
+    if fmt == "csv":
+        writer = csv.writer(sys.stdout)
+        writer.writerow(EXPORT_COLUMNS)
+        for r in rows:
+            writer.writerow([_cell(r[c]) for c in EXPORT_COLUMNS])
+        return EXIT_OK
+    # markdown report (with a value summary header)
+    totals: Dict[str, float] = {}
+    for r in rows:
+        amt = r["value_amount"]
+        if isinstance(amt, (int, float)) and not isinstance(amt, bool):
+            cur = str(r["value_currency"] or "(unknown)")
+            totals[cur] = totals.get(cur, 0.0) + float(amt)
+    sys.stdout.write(_markdown_report(rows, totals))
+    return EXIT_OK
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     vault = resolve_vault(args)
     findings: List[str] = []
@@ -1708,7 +1811,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
 
 SUBCOMMANDS = [
     "init", "ingest", "list", "get", "show", "find", "search",
-    "due", "obligations", "stats", "verify", "review", "accept", "demo",
+    "due", "obligations", "stats", "verify", "review", "accept", "export", "demo",
 ]
 FIND_FLAGS = [
     "--counterparty", "--governing-law", "--currency", "--expiring-before",
@@ -1892,6 +1995,13 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(p_stats)
     p_stats.add_argument("--as-of", dest="as_of", metavar="DATE", help="reference 'today' for 'expiring soon' (default: actual today)")
     p_stats.set_defaults(func=cmd_stats)
+
+    p_export = sub.add_parser("export", help="export the register as csv | md | json (for spreadsheets / reports)")
+    _add_common(p_export)
+    p_export.add_argument("--format", choices=["csv", "md", "json"], help="output format (default csv; --json forces json)")
+    p_export.add_argument("--expiring-before", dest="expiring_before", metavar="DATE", help="only deals expiring before DATE")
+    p_export.add_argument("--needs-review", dest="needs_review", action="store_true", help="only deals with review flags")
+    p_export.set_defaults(func=cmd_export)
 
     p_verify = sub.add_parser("verify", help="integrity check (source sha256 + git state)")
     _add_common(p_verify)
