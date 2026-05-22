@@ -1,0 +1,1632 @@
+#!/usr/bin/env python3
+"""contract-vault — the post-signature management layer of the contract-ops CLI suite.
+
+The suite lifecycle:
+
+    extract (entry) -> draft / review / compare / convert / sign (core) -> contract-vault (manage-out)
+
+``template-vault`` stores BLANKS (clauses, variables, composition). ``contract-vault``
+is its post-signature sibling: it stores SIGNED INSTANCES (parties, dates, obligations)
+in the same git-backed, single-file, subcommand-rich shape. It is where executed deals
+are registered, searched, and where renewal / notice / payment deadlines are surfaced
+as a calendar. "obligations" is a VIEW over the register, not a separate tool.
+
+contract-vault does NOT extract documents itself. ``ingest`` consumes the JSON emitted
+by ``extract-cli`` (https://github.com/DrBaher/extract-cli) -- either by shelling out to
+``extract <file> --json`` when it is on PATH, or by reading piped JSON on stdin. Every
+field that extract emits carries a confidence and a source; contract-vault stores and
+propagates those, treating data as "verify, not trust".
+
+Stdlib-only. No third-party runtime dependencies. LLM use is opt-in and delegated to the
+extract step (never reimplemented and never on a hot path); the .ics / reminder / register
+logic is purely deterministic and works fully with the LLM off.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
+
+__version__ = "0.1.0"
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+RECORD_SCHEMA_VERSION = "1.0"
+VAULT_CONFIG_NAME = ".contract-vault.json"
+VAULT_KIND = "executed-contract-vault"
+RECORD_FILENAME = "record.json"
+DEFAULT_WITHIN_DAYS = 90
+
+# Field-provenance markers. extract emits {deterministic, llm, none}; contract-vault adds
+# "manual" for human-entered/edited values. Treated as "verify, not trust" downstream.
+SOURCE_DETERMINISTIC = "deterministic"
+SOURCE_LLM = "llm"
+SOURCE_MANUAL = "manual"
+SOURCE_NONE = "none"
+
+# Exit codes (suite convention): 0 ok, 1 generic failure / findings, 2 bad usage.
+EXIT_OK = 0
+EXIT_FAIL = 1
+EXIT_USAGE = 2
+
+# Output state, configured once in main() from flags + environment.
+_NO_COLOR = False
+_QUIET = False
+
+JSONObj = Dict[str, Any]
+
+
+# ---------------------------------------------------------------------------
+# Errors
+# ---------------------------------------------------------------------------
+
+
+class VaultError(Exception):
+    """User-actionable error; printed to stderr, exits 1."""
+
+
+class NotFoundError(VaultError):
+    """A requested resource (vault, deal, field) does not exist."""
+
+
+class UsageError(VaultError):
+    """Bad invocation; exits 2."""
+
+
+# ---------------------------------------------------------------------------
+# Output helpers (color, json, stderr, --why)
+# ---------------------------------------------------------------------------
+
+
+def _configure_streams() -> None:
+    """Force UTF-8 on stdout/stderr regardless of locale (macOS CI safety)."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8")
+            except (ValueError, OSError):
+                pass
+
+
+def _color_enabled(stream: Any = None) -> bool:
+    if _NO_COLOR:
+        return False
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("FORCE_COLOR"):
+        return True
+    s = stream if stream is not None else sys.stdout
+    isatty = getattr(s, "isatty", None)
+    return bool(isatty()) if callable(isatty) else False
+
+
+def _c(text: str, code: str, stream: Any = None) -> str:
+    if not _color_enabled(stream):
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def _green(s: str) -> str:
+    return _c(s, "32")
+
+
+def _yellow(s: str) -> str:
+    return _c(s, "33")
+
+
+def _red(s: str) -> str:
+    return _c(s, "31", sys.stderr)
+
+
+def _cyan(s: str) -> str:
+    return _c(s, "36")
+
+
+def _dim(s: str) -> str:
+    return _c(s, "2")
+
+
+def _bold(s: str) -> str:
+    return _c(s, "1")
+
+
+def _eprint(*parts: str) -> None:
+    print(*parts, file=sys.stderr)
+
+
+def _out(*parts: str) -> None:
+    if _QUIET:
+        return
+    print(*parts)
+
+
+def _dump_json(obj: Any) -> str:
+    """Stable, human-readable JSON with a trailing newline for clean diffs."""
+    return json.dumps(obj, indent=2, sort_keys=False, ensure_ascii=False) + "\n"
+
+
+def _emit_json(obj: Any) -> None:
+    sys.stdout.write(_dump_json(obj))
+
+
+def _why(args: argparse.Namespace, header: str, *lines: str) -> None:
+    """Structured explanation on stderr, only when --why is set."""
+    if not getattr(args, "why", False):
+        return
+    _eprint(f"[why] {header}")
+    for line in lines:
+        _eprint(f"  {line}")
+
+
+# ---------------------------------------------------------------------------
+# Small utilities
+# ---------------------------------------------------------------------------
+
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def slugify(text: str) -> str:
+    """Filesystem- and url-safe slug. Falls back to 'untitled' for empty input."""
+    out = _SLUG_RE.sub("-", text.strip().lower()).strip("-")
+    return out or "untitled"
+
+
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _now_utc() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def _now_iso() -> str:
+    return _now_utc().replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _ics_stamp(moment: dt.datetime) -> str:
+    return moment.astimezone(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+_MONTHS = {
+    m.lower(): i
+    for i, m in enumerate(
+        [
+            "January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December",
+        ],
+        start=1,
+    )
+}
+_MONTHS.update({m[:3].lower(): i for m, i in list(_MONTHS.items())})
+_ISO_DATE_RE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+_MONTH_NAME_RE = re.compile(
+    r"\b([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})\b"
+)
+_DAY_MONTH_RE = re.compile(r"\b(\d{1,2})\s+([A-Za-z]{3,9})\.?\s+(\d{4})\b")
+
+
+def parse_date(value: Any) -> Optional[dt.date]:
+    """Deterministically parse a date from common contract formats.
+
+    Accepts ISO 8601 (date or datetime, optional 'Z'/offset), 'YYYY/MM/DD',
+    'Month D, YYYY', 'Mon D, YYYY' and 'D Month YYYY'. Returns None if nothing
+    parseable is found. Intentionally avoids ambiguous numeric forms like MM/DD/YYYY.
+    """
+    if value is None:
+        return None
+    if isinstance(value, dt.datetime):
+        return value.date()
+    if isinstance(value, dt.date):
+        return value
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    # ISO date or datetime: take the leading date component.
+    iso = _ISO_DATE_RE.search(text)
+    if iso and text[: iso.start()].strip() == "":
+        try:
+            return dt.date(int(iso.group(1)), int(iso.group(2)), int(iso.group(3)))
+        except ValueError:
+            return None
+    m = re.match(r"^(\d{4})/(\d{2})/(\d{2})$", text)
+    if m:
+        try:
+            return dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            return None
+    name = _MONTH_NAME_RE.search(text)
+    if name:
+        mon = _MONTHS.get(name.group(1).lower())
+        if mon:
+            try:
+                return dt.date(int(name.group(3)), mon, int(name.group(2)))
+            except ValueError:
+                return None
+    dm = _DAY_MONTH_RE.search(text)
+    if dm:
+        mon = _MONTHS.get(dm.group(2).lower())
+        if mon:
+            try:
+                return dt.date(int(dm.group(3)), mon, int(dm.group(1)))
+            except ValueError:
+                return None
+    return None
+
+
+def scan_date(text: str) -> Optional[dt.date]:
+    """Find the first recognizable date anywhere inside free text (for obligations)."""
+    for rx, order in (
+        (_ISO_DATE_RE, ("y", "m", "d")),
+        (_MONTH_NAME_RE, ("mon", "d", "y")),
+        (_DAY_MONTH_RE, ("d", "mon", "y")),
+    ):
+        m = rx.search(text)
+        if not m:
+            continue
+        try:
+            if order[0] == "y":
+                return dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            if order == ("mon", "d", "y"):
+                mon = _MONTHS.get(m.group(1).lower())
+                if mon:
+                    return dt.date(int(m.group(3)), mon, int(m.group(2)))
+            if order == ("d", "mon", "y"):
+                mon = _MONTHS.get(m.group(2).lower())
+                if mon:
+                    return dt.date(int(m.group(3)), mon, int(m.group(1)))
+        except ValueError:
+            continue
+    return None
+
+
+_CURRENCY_SYMBOLS = {"$": "USD", "€": "EUR", "£": "GBP", "¥": "JPY"}
+_CURRENCY_CODES = {"USD", "EUR", "GBP", "JPY", "CAD", "AUD", "CHF", "CNY", "INR"}
+_MONEY_NUM_RE = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*([kKmMbB][nN]?)?")
+
+
+def parse_money(value: Any) -> Tuple[Optional[float], Optional[str]]:
+    """Deterministically parse an amount + currency from a value or string.
+
+    Handles numbers, '$120,000', 'USD 120000', '120000 USD', and k/m/b suffixes.
+    Returns (amount, currency) with either element possibly None.
+    """
+    if value is None:
+        return None, None
+    if isinstance(value, bool):
+        return None, None
+    if isinstance(value, (int, float)):
+        return float(value), None
+    if isinstance(value, dict):
+        amt = value.get("amount")
+        cur = value.get("currency")
+        if isinstance(amt, (int, float)) and not isinstance(amt, bool):
+            return float(amt), (str(cur) if cur else None)
+        return parse_money(value.get("raw") or value.get("value"))
+    if not isinstance(value, str):
+        return None, None
+    text = value.strip()
+    if not text:
+        return None, None
+    currency: Optional[str] = None
+    for sym, code in _CURRENCY_SYMBOLS.items():
+        if sym in text:
+            currency = code
+            break
+    if currency is None:
+        for token in re.findall(r"[A-Za-z]{3}", text):
+            if token.upper() in _CURRENCY_CODES:
+                currency = token.upper()
+                break
+    m = _MONEY_NUM_RE.search(text)
+    if not m:
+        return None, currency
+    try:
+        amount = float(m.group(1).replace(",", ""))
+    except ValueError:
+        return None, currency
+    suffix = (m.group(2) or "").lower()
+    if suffix.startswith("k"):
+        amount *= 1_000
+    elif suffix.startswith("m"):
+        amount *= 1_000_000
+    elif suffix.startswith("b"):
+        amount *= 1_000_000_000
+    return amount, currency
+
+
+def load_json_file(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise NotFoundError(f"file not found: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise VaultError(f"invalid JSON in {path}: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# Git operations
+# ---------------------------------------------------------------------------
+
+
+def _git(repo: Path, *args: str, check: bool = True, env: Optional[Dict[str, str]] = None) -> subprocess.CompletedProcess[str]:
+    cmd = ["git", "-C", str(repo), *args]
+    proc = subprocess.run(
+        cmd,
+        text=True,
+        capture_output=True,
+        env={**os.environ, **(env or {})},
+    )
+    if check and proc.returncode != 0:
+        raise VaultError(f"git {' '.join(args)} failed: {proc.stderr.strip() or proc.stdout.strip()}")
+    return proc
+
+
+def _git_available() -> bool:
+    return shutil.which("git") is not None
+
+
+def _vault_commit_identity(repo: Path) -> Tuple[str, str]:
+    """Identity for vault commits.
+
+    Honors the user's configured git identity / GIT_AUTHOR_* env when present, and
+    otherwise falls back to a neutral 'contract-vault' bot so that ingest and demo
+    succeed in CI and fresh environments. NOTE: this is unrelated to the identity used
+    for commits to the contract-vault *source* repository.
+    """
+    name = os.environ.get("GIT_AUTHOR_NAME")
+    email = os.environ.get("GIT_AUTHOR_EMAIL")
+    if not name:
+        got = _git(repo, "config", "user.name", check=False)
+        name = got.stdout.strip() or None
+    if not email:
+        got = _git(repo, "config", "user.email", check=False)
+        email = got.stdout.strip() or None
+    return name or "contract-vault", email or "contract-vault@localhost"
+
+
+def git_commit(repo: Path, message: str, paths: Optional[Sequence[Path]] = None) -> str:
+    """Stage and commit; returns the new commit hash. Identity-safe in any environment."""
+    if paths:
+        _git(repo, "add", "--", *[str(p) for p in paths])
+    else:
+        _git(repo, "add", "-A")
+    status = _git(repo, "status", "--porcelain")
+    if not status.stdout.strip():
+        head = _git(repo, "rev-parse", "HEAD", check=False)
+        return head.stdout.strip()
+    name, email = _vault_commit_identity(repo)
+    _git(
+        repo,
+        "-c", f"user.name={name}",
+        "-c", f"user.email={email}",
+        "commit", "-q", "-m", message,
+    )
+    return _git(repo, "rev-parse", "HEAD").stdout.strip()
+
+
+# ---------------------------------------------------------------------------
+# Vault discovery & records
+# ---------------------------------------------------------------------------
+
+
+def is_vault(path: Path) -> bool:
+    return (path / VAULT_CONFIG_NAME).is_file()
+
+
+def resolve_vault(args: argparse.Namespace) -> Path:
+    """Locate the vault: --vault flag, CONTRACT_VAULT_DIR env, then walk up from cwd."""
+    explicit = getattr(args, "vault", None) or os.environ.get("CONTRACT_VAULT_DIR")
+    if explicit:
+        path = Path(explicit).expanduser().resolve()
+        if not is_vault(path):
+            raise NotFoundError(f"not a contract-vault (no {VAULT_CONFIG_NAME}): {path}")
+        return path
+    cur = Path.cwd().resolve()
+    for candidate in (cur, *cur.parents):
+        if is_vault(candidate):
+            return candidate
+    raise NotFoundError(
+        "no contract-vault found here or in any parent directory; run "
+        "`contract-vault init` first (or pass --vault)"
+    )
+
+
+def load_record(record_dir: Path) -> JSONObj:
+    data = load_json_file(record_dir / RECORD_FILENAME)
+    if not isinstance(data, dict):
+        raise VaultError(f"malformed record (not an object): {record_dir / RECORD_FILENAME}")
+    return cast(JSONObj, data)
+
+
+def iter_record_dirs(vault: Path) -> List[Path]:
+    """All deal directories (those containing a record.json), sorted by id."""
+    found = [p.parent for p in vault.rglob(RECORD_FILENAME) if ".git" not in p.parts]
+    return sorted(found, key=lambda d: deal_id(vault, d))
+
+
+def deal_id(vault: Path, record_dir: Path) -> str:
+    return record_dir.relative_to(vault).as_posix()
+
+
+def load_all_records(vault: Path) -> List[Tuple[str, Path, JSONObj]]:
+    out: List[Tuple[str, Path, JSONObj]] = []
+    for d in iter_record_dirs(vault):
+        out.append((deal_id(vault, d), d, load_record(d)))
+    return out
+
+
+def find_deal(vault: Path, ident: str) -> Tuple[str, Path, JSONObj]:
+    """Resolve a deal by exact id, then by unique leaf name, then by unique prefix."""
+    records = load_all_records(vault)
+    by_id = {rid: (rid, d, rec) for rid, d, rec in records}
+    if ident in by_id:
+        return by_id[ident]
+    leaf_matches = [t for t in records if t[0].split("/")[-1] == ident]
+    if len(leaf_matches) == 1:
+        return leaf_matches[0]
+    prefix_matches = [t for t in records if t[0].startswith(ident)]
+    if len(prefix_matches) == 1:
+        return prefix_matches[0]
+    if not records:
+        raise NotFoundError("vault is empty; nothing to get")
+    if len(leaf_matches) > 1 or len(prefix_matches) > 1:
+        raise UsageError(f"ambiguous deal id {ident!r}; matches multiple deals")
+    raise NotFoundError(f"no deal matching {ident!r}")
+
+
+# ---------------------------------------------------------------------------
+# extract -> record mapping
+# ---------------------------------------------------------------------------
+
+
+def _field(node: Any) -> Tuple[Any, float, str]:
+    """Unpack an extract field {value, confidence, source} with safe defaults."""
+    if isinstance(node, dict):
+        value = node.get("value")
+        try:
+            conf = float(node.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            conf = 0.0
+        source = str(node.get("source", SOURCE_NONE) or SOURCE_NONE)
+        return value, conf, source
+    return None, 0.0, SOURCE_NONE
+
+
+def _combine_source(*sources: str) -> str:
+    """Provenance of a derived value: 'llm' if any input is llm, else 'deterministic'."""
+    sset = {s for s in sources if s}
+    if SOURCE_LLM in sset:
+        return SOURCE_LLM
+    if sset & {SOURCE_DETERMINISTIC, SOURCE_MANUAL}:
+        return SOURCE_DETERMINISTIC
+    return SOURCE_NONE
+
+
+def validate_extract_payload(payload: Any) -> JSONObj:
+    """Light structural check that this is extract-cli output (the ingest input contract).
+
+    Full schema conformance is covered by tests against the vendored
+    extract-output.schema.json; here we only guard against obviously-wrong input.
+    """
+    if not isinstance(payload, dict):
+        raise VaultError("ingest input is not a JSON object (expected extract-cli output)")
+    missing = [k for k in ("document", "parties", "dates", "term", "_meta") if k not in payload]
+    if missing:
+        raise VaultError(
+            "ingest input does not look like extract-cli output; missing keys: "
+            + ", ".join(missing)
+            + "  (pipe `extract <file> --json` into `contract-vault ingest -`)"
+        )
+    doc = payload.get("document")
+    if not isinstance(doc, dict) or "sha256" not in doc:
+        raise VaultError("extract output 'document' block is missing or has no sha256")
+    return cast(JSONObj, payload)
+
+
+def build_record(
+    payload: JSONObj,
+    *,
+    deal_identifier: str,
+    title: Optional[str],
+    source_rel_path: str,
+    source_vaulted: bool,
+) -> JSONObj:
+    """Map an extract-cli payload onto a contract-vault record. Pure / deterministic."""
+    field_meta: JSONObj = {}
+
+    def record_field(name: str, conf: float, source: str) -> None:
+        field_meta[name] = {"confidence": round(conf, 4), "source": source}
+
+    # Parties ---------------------------------------------------------------
+    parties: List[JSONObj] = []
+    for p in payload.get("parties", []) or []:
+        if not isinstance(p, dict):
+            continue
+        try:
+            conf = float(p.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            conf = 0.0
+        parties.append(
+            {
+                "name": str(p.get("name", "")),
+                "role": p.get("role"),
+                "source": str(p.get("source", SOURCE_NONE) or SOURCE_NONE),
+                "confidence": round(conf, 4),
+            }
+        )
+
+    # Dates -----------------------------------------------------------------
+    dates = payload.get("dates", {}) or {}
+    eff_val, eff_conf, eff_src = _field(dates.get("effective"))
+    exp_val, exp_conf, exp_src = _field(dates.get("expiration"))
+    effective = parse_date(eff_val)
+    expiration = parse_date(exp_val)
+    record_field("effective_date", eff_conf, eff_src)
+    record_field("expiration_date", exp_conf, exp_src)
+
+    # Term ------------------------------------------------------------------
+    term = payload.get("term", {}) or {}
+    len_val, len_conf, len_src = _field(term.get("length"))
+    ar_val, ar_conf, ar_src = _field(term.get("auto_renew"))
+    np_val, np_conf, np_src = _field(term.get("notice_period_days"))
+    auto_renew = ar_val if isinstance(ar_val, bool) else None
+    notice_days: Optional[int] = None
+    if isinstance(np_val, bool):
+        notice_days = None
+    elif isinstance(np_val, (int, float)):
+        notice_days = int(np_val)
+    elif isinstance(np_val, str):
+        nm = re.search(r"\d+", np_val)
+        notice_days = int(nm.group()) if nm else None
+    record_field("term.length", len_conf, len_src)
+    record_field("term.auto_renew", ar_conf, ar_src)
+    record_field("term.notice_period_days", np_conf, np_src)
+
+    renewal_window: Optional[JSONObj] = None
+    if expiration is not None and notice_days is not None:
+        deadline = expiration - dt.timedelta(days=notice_days)
+        renewal_window = {
+            "deadline": deadline.isoformat(),
+            "expiration": expiration.isoformat(),
+        }
+
+    # Governing law & value -------------------------------------------------
+    gl_val, gl_conf, gl_src = _field(payload.get("governing_law"))
+    governing_law = gl_val if isinstance(gl_val, str) and gl_val.strip() else None
+    record_field("governing_law", gl_conf, gl_src)
+
+    val_val, val_conf, val_src = _field(payload.get("value"))
+    amount, currency = parse_money(val_val)
+    value_obj: JSONObj = {"raw": val_val, "amount": amount, "currency": currency}
+    record_field("value", val_conf, val_src)
+
+    # Obligations (computed, deterministic; the engine behind `due`) ---------
+    obligations: List[JSONObj] = []
+    if expiration is not None:
+        obligations.append(
+            {
+                "type": "expiration",
+                "due": expiration.isoformat(),
+                "description": "Contract expires.",
+                "source": exp_src if exp_src != SOURCE_NONE else SOURCE_DETERMINISTIC,
+                "confidence": round(exp_conf, 4),
+            }
+        )
+    if renewal_window is not None and notice_days is not None and expiration is not None:
+        ar_note = "auto-renews" if auto_renew else ("does not auto-renew" if auto_renew is False else "renewal terms apply")
+        obligations.append(
+            {
+                "type": "renewal_notice",
+                "due": renewal_window["deadline"],
+                "description": (
+                    f"Notice deadline: {notice_days} days before expiration "
+                    f"({expiration.isoformat()}); contract {ar_note}."
+                ),
+                "source": _combine_source(exp_src, np_src, ar_src),
+                "confidence": round(min(exp_conf, np_conf), 4),
+            }
+        )
+    for ob in payload.get("obligations", []) or []:
+        if not isinstance(ob, dict):
+            continue
+        text = str(ob.get("text", "")).strip()
+        if not text:
+            continue
+        try:
+            oconf = float(ob.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            oconf = 0.0
+        due = scan_date(text)
+        obligations.append(
+            {
+                "type": "obligation",
+                "due": due.isoformat() if due else None,
+                "description": text,
+                "source": str(ob.get("source", SOURCE_NONE) or SOURCE_NONE),
+                "confidence": round(oconf, 4),
+            }
+        )
+
+    # Provenance ------------------------------------------------------------
+    meta = payload.get("_meta", {}) or {}
+    doc = payload.get("document", {}) or {}
+    provenance: JSONObj = {
+        "from_extract": True,
+        "extractor_version": str(meta.get("extractor_version", "unknown")),
+        "llm_used": bool(meta.get("llm_used", False)),
+        "ingested_at": _now_iso(),
+    }
+
+    record: JSONObj = {
+        "schema_version": RECORD_SCHEMA_VERSION,
+        "id": deal_identifier,
+        "title": title,
+        "status": "signed",
+        "signed_on": effective.isoformat() if effective else None,
+        "parties": parties,
+        "effective_date": effective.isoformat() if effective else None,
+        "expiration_date": expiration.isoformat() if expiration else None,
+        "term": {
+            "length": len_val if isinstance(len_val, str) else (str(len_val) if len_val is not None else None),
+            "auto_renew": auto_renew,
+            "notice_period_days": notice_days,
+            "renewal_window": renewal_window,
+        },
+        "governing_law": governing_law,
+        "value": value_obj,
+        "source": {
+            "path": source_rel_path,
+            "sha256": str(doc.get("sha256", "")),
+            "format": str(doc.get("format", "unknown")),
+            "vaulted": source_vaulted,
+        },
+        "obligations": obligations,
+        "provenance": provenance,
+        "field_meta": field_meta,
+    }
+    return record
+
+
+def record_searchable_text(record: JSONObj) -> str:
+    parts: List[str] = [str(record.get("title") or ""), str(record.get("governing_law") or "")]
+    for p in record.get("parties", []):
+        parts.append(str(p.get("name", "")))
+        parts.append(str(p.get("role") or ""))
+    for ob in record.get("obligations", []):
+        parts.append(str(ob.get("description", "")))
+    val = record.get("value", {})
+    if isinstance(val, dict):
+        parts.append(str(val.get("raw") or ""))
+    return "  ".join(parts).lower()
+
+
+# ---------------------------------------------------------------------------
+# Obligations / due projection (pure, deterministic) -> the `due` view
+# ---------------------------------------------------------------------------
+
+
+def parse_within(text: str) -> int:
+    """Parse a window like '90d', '90', '30', '12w', '6m' into a day count."""
+    t = text.strip().lower()
+    m = re.fullmatch(r"(\d+)\s*([dwmy])?", t)
+    if not m:
+        raise UsageError(f"invalid --within value: {text!r} (try 30d, 60d, 90d)")
+    n = int(m.group(1))
+    unit = m.group(2) or "d"
+    return {"d": n, "w": n * 7, "m": n * 30, "y": n * 365}[unit]
+
+
+def upcoming_obligations(
+    vault: Path,
+    *,
+    within_days: int,
+    as_of: dt.date,
+) -> List[JSONObj]:
+    """Project dated obligations across all deals into actions within the window."""
+    horizon = as_of + dt.timedelta(days=within_days)
+    rows: List[JSONObj] = []
+    for rid, _dir, rec in load_all_records(vault):
+        counterparty = primary_counterparty(rec)
+        for ob in rec.get("obligations", []):
+            due_s = ob.get("due")
+            if not due_s:
+                continue
+            due = parse_date(due_s)
+            if due is None or due < as_of or due > horizon:
+                continue
+            days_until = (due - as_of).days
+            rows.append(
+                {
+                    "deal": rid,
+                    "counterparty": counterparty,
+                    "type": ob.get("type", "obligation"),
+                    "due": due.isoformat(),
+                    "days_until": days_until,
+                    "description": ob.get("description", ""),
+                    "source": ob.get("source", SOURCE_NONE),
+                    "confidence": ob.get("confidence", 0.0),
+                    "lead_days": _suggest_lead_days(str(ob.get("type", ""))),
+                }
+            )
+    rows.sort(key=lambda r: (r["due"], r["deal"]))
+    return rows
+
+
+def _suggest_lead_days(ob_type: str) -> int:
+    return {"renewal_notice": 14, "expiration": 30, "obligation": 7}.get(ob_type, 7)
+
+
+def primary_counterparty(record: JSONObj) -> str:
+    parties = record.get("parties", [])
+    if parties and isinstance(parties[0], dict):
+        return str(parties[0].get("name", "")) or "(unknown)"
+    return "(unknown)"
+
+
+# ---------------------------------------------------------------------------
+# RFC 5545 (.ics) generation -- stdlib only, no dependency
+# ---------------------------------------------------------------------------
+
+
+def _ics_escape(text: str) -> str:
+    return (
+        text.replace("\\", "\\\\")
+        .replace(";", "\\;")
+        .replace(",", "\\,")
+        .replace("\r\n", "\\n")
+        .replace("\n", "\\n")
+    )
+
+
+def _ics_fold(line: str) -> str:
+    """Fold a content line to <=75 octets, continuation lines prefixed with one space."""
+    raw = line.encode("utf-8")
+    if len(raw) <= 75:
+        return line
+    pieces: List[bytes] = []
+    i = 0
+    first = True
+    while i < len(raw):
+        take = 75 if first else 74  # continuation reserves one octet for the leading space
+        end = min(i + take, len(raw))
+        while end < len(raw) and (raw[end] & 0xC0) == 0x80:
+            end -= 1  # never split a multibyte UTF-8 sequence
+        pieces.append(raw[i:end])
+        i = end
+        first = False
+    return "\r\n ".join(p.decode("utf-8") for p in pieces)
+
+
+def build_ics(rows: List[JSONObj], *, now: Optional[dt.datetime] = None) -> str:
+    """Render upcoming obligations as a valid RFC 5545 VCALENDAR (CRLF, folded)."""
+    moment = now or _now_utc()
+    stamp = _ics_stamp(moment)
+    lines: List[str] = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//DrBaher//contract-vault " + __version__ + "//EN",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+    ]
+    for row in rows:
+        due = parse_date(row["due"])
+        if due is None:
+            continue
+        dtstart = due.strftime("%Y%m%d")
+        dtend = (due + dt.timedelta(days=1)).strftime("%Y%m%d")
+        summary = f"{row['counterparty']}: {str(row['type']).replace('_', ' ')}"
+        desc = f"{row['description']} [deal: {row['deal']}; source: {row['source']}]"
+        uid_seed = f"{row['deal']}|{row['type']}|{row['due']}|{row['description']}"
+        uid = sha256_bytes(uid_seed.encode("utf-8"))[:24] + "@contract-vault"
+        lead = int(row.get("lead_days", 7))
+        lines.extend(
+            [
+                "BEGIN:VEVENT",
+                _ics_fold(f"UID:{uid}"),
+                f"DTSTAMP:{stamp}",
+                f"DTSTART;VALUE=DATE:{dtstart}",
+                f"DTEND;VALUE=DATE:{dtend}",
+                _ics_fold(f"SUMMARY:{_ics_escape(summary)}"),
+                _ics_fold(f"DESCRIPTION:{_ics_escape(desc)}"),
+                "TRANSP:TRANSPARENT",
+                "BEGIN:VALARM",
+                "ACTION:DISPLAY",
+                _ics_fold(f"DESCRIPTION:{_ics_escape('Reminder: ' + summary)}"),
+                f"TRIGGER:-P{lead}D",
+                "END:VALARM",
+                "END:VEVENT",
+            ]
+        )
+    lines.append("END:VCALENDAR")
+    return "\r\n".join(lines) + "\r\n"
+
+
+# ---------------------------------------------------------------------------
+# LLM config lookup (opt-in, delegated to extract -- never on a hot path here)
+# ---------------------------------------------------------------------------
+
+
+def find_llm_config() -> Optional[Path]:
+    candidates = [
+        Path.home() / ".config" / "contract-ops" / "llm.json",
+        Path.cwd() / "config" / "llm.json",
+    ]
+    for c in candidates:
+        if c.is_file():
+            return c
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Acquiring an extract payload for `ingest`
+# ---------------------------------------------------------------------------
+
+
+def run_extract(document: Path, *, use_llm: bool) -> JSONObj:
+    """Shell out to `extract <file> --json`. Never reimplements extraction."""
+    if shutil.which("extract") is None:
+        raise VaultError(
+            "`extract` is not on PATH and no JSON was piped in.\n"
+            "  Install it:   pip install extract-cli\n"
+            "  Or pipe JSON: extract <file> --json | contract-vault ingest -"
+        )
+    cmd = ["extract", str(document), "--json"]
+    if use_llm:
+        cmd.append("--llm")
+    proc = subprocess.run(cmd, text=True, capture_output=True)
+    if proc.returncode != 0:
+        raise VaultError(f"extract failed (exit {proc.returncode}): {proc.stderr.strip()}")
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise VaultError(f"extract did not emit valid JSON: {exc}") from exc
+    return validate_extract_payload(data)
+
+
+def acquire_payload(args: argparse.Namespace) -> Tuple[JSONObj, Optional[Path]]:
+    """Return (extract_payload, local_source_path_or_None) per the integration rules."""
+    target = args.file
+    if target == "-":
+        raw = sys.stdin.read()
+        if not raw.strip():
+            raise UsageError("no JSON on stdin (use: extract <file> --json | contract-vault ingest -)")
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise VaultError(f"stdin is not valid JSON: {exc}") from exc
+        return validate_extract_payload(data), None
+    path = Path(target).expanduser()
+    if not path.exists():
+        raise NotFoundError(f"file not found: {path}")
+    # A .json file that is already extract output is ingested directly (offline path).
+    if path.suffix.lower() == ".json":
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise VaultError(f"{path} is not valid JSON: {exc}") from exc
+        if isinstance(data, dict) and "document" in data and "_meta" in data:
+            payload = validate_extract_payload(data)
+            src = payload.get("document", {}).get("source_path")
+            return payload, (Path(src) if src and Path(str(src)).exists() else None)
+    # Otherwise treat it as a document and delegate extraction.
+    payload = run_extract(path, use_llm=getattr(args, "llm", False))
+    return payload, path
+
+
+def store_record(
+    vault: Path,
+    payload: JSONObj,
+    *,
+    counterparty_override: Optional[str],
+    name_override: Optional[str],
+    local_source: Optional[Path],
+) -> Tuple[str, bool]:
+    """Build, place, and commit a record. Returns (deal_id, created)."""
+    doc = payload.get("document", {}) or {}
+    sha = str(doc.get("sha256", ""))
+
+    # Idempotency: if any existing record already has this source sha256, skip.
+    if sha:
+        for rid, _d, rec in load_all_records(vault):
+            if str(rec.get("source", {}).get("sha256", "")) == sha:
+                return rid, False
+
+    parties = payload.get("parties", []) or []
+    first_party = parties[0].get("name") if parties and isinstance(parties[0], dict) else None
+    counterparty = counterparty_override or (str(first_party) if first_party else "unfiled")
+    title = doc.get("title")
+    if name_override:
+        name = name_override
+    elif isinstance(title, str) and title.strip():
+        name = title
+    else:
+        src_path = doc.get("source_path")
+        name = Path(str(src_path)).stem if src_path else (sha[:12] if sha else "deal")
+
+    cp_slug = slugify(counterparty)
+    name_slug = slugify(name)
+    base_rel = f"{cp_slug}/{name_slug}"
+    rel = base_rel
+    n = 2
+    while (vault / rel).exists():
+        rel = f"{base_rel}-{n}"
+        n += 1
+    deal_dir = vault / rel
+    deal_dir.mkdir(parents=True, exist_ok=True)
+
+    # Vault the source document if we have a readable local copy.
+    source_vaulted = False
+    source_rel = str(doc.get("source_path") or "")
+    fmt = str(doc.get("format", "unknown"))
+    if local_source and local_source.exists():
+        ext = local_source.suffix or {"markdown": ".md", "text": ".txt", "pdf": ".pdf", "docx": ".docx", "html": ".html"}.get(fmt, "")
+        dest = deal_dir / f"source{ext}"
+        shutil.copy2(local_source, dest)
+        source_rel = dest.name
+        source_vaulted = True
+        actual = sha256_file(dest)
+        if sha and actual != sha:
+            doc["sha256"] = actual  # trust the bytes we actually stored
+
+    record = build_record(
+        payload,
+        deal_identifier=rel,
+        title=(title if isinstance(title, str) else None),
+        source_rel_path=source_rel or "(not vaulted)",
+        source_vaulted=source_vaulted,
+    )
+    (deal_dir / RECORD_FILENAME).write_text(_dump_json(record), encoding="utf-8")
+
+    git_commit(vault, f"ingest: {rel}", paths=[deal_dir])
+    return rel, True
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    path = Path(getattr(args, "path", None) or ".").expanduser().resolve()
+    path.mkdir(parents=True, exist_ok=True)
+    if is_vault(path):
+        _out(_yellow(f"already a contract-vault: {path}"))
+        return EXIT_OK
+    if not _git_available():
+        raise VaultError("git is required but was not found on PATH")
+    if not (path / ".git").exists():
+        _git(path, "init", "-q")
+    config = {
+        "schema_version": RECORD_SCHEMA_VERSION,
+        "kind": VAULT_KIND,
+        "created": _now_iso(),
+        "tool": f"contract-vault {__version__}",
+    }
+    (path / VAULT_CONFIG_NAME).write_text(_dump_json(config), encoding="utf-8")
+    readme = path / "README.md"
+    if not readme.exists():
+        readme.write_text(
+            "# Executed-contract vault\n\n"
+            "Managed by [contract-vault](https://cli.drbaher.com). "
+            "Each deal lives under `<counterparty>/<name>/record.json` alongside its source document.\n",
+            encoding="utf-8",
+        )
+    git_commit(path, "init: contract-vault")
+    _why(args, "init", f"vault={path}", f"git={'new' if not (path / '.git').exists() else 'existing'}")
+    if getattr(args, "json", False):
+        _emit_json({"vault": str(path), "kind": VAULT_KIND, "schema_version": RECORD_SCHEMA_VERSION})
+    else:
+        _out(_green(f"Initialized contract-vault at {path}"))
+    return EXIT_OK
+
+
+def cmd_ingest(args: argparse.Namespace) -> int:
+    vault = resolve_vault(args)
+    _why(
+        args,
+        "ingest",
+        f"source={'stdin' if args.file == '-' else args.file}",
+        f"extract_on_path={shutil.which('extract') is not None}",
+        f"llm={'on' if getattr(args, 'llm', False) else 'off'}",
+    )
+    if getattr(args, "llm", False) and find_llm_config() is None:
+        _why(args, "ingest.llm", "no llm.json found; extract will use its own defaults")
+    payload, local_source = acquire_payload(args)
+    deal, created = store_record(
+        vault,
+        payload,
+        counterparty_override=getattr(args, "counterparty", None),
+        name_override=getattr(args, "name", None),
+        local_source=local_source,
+    )
+    if getattr(args, "json", False):
+        _emit_json({"deal": deal, "created": created, "vault": str(vault)})
+    elif created:
+        _out(_green(f"Ingested {deal}"))
+    else:
+        _out(_yellow(f"Already ingested (same sha256): {deal}"))
+    return EXIT_OK
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    vault = resolve_vault(args)
+    records = load_all_records(vault)
+    if getattr(args, "json", False):
+        _emit_json(
+            {
+                "vault": str(vault),
+                "count": len(records),
+                "deals": [
+                    {
+                        "id": rid,
+                        "title": rec.get("title"),
+                        "counterparty": primary_counterparty(rec),
+                        "expiration_date": rec.get("expiration_date"),
+                        "value": rec.get("value", {}).get("amount"),
+                        "currency": rec.get("value", {}).get("currency"),
+                        "status": rec.get("status"),
+                    }
+                    for rid, _d, rec in records
+                ],
+            }
+        )
+        return EXIT_OK
+    if not records:
+        _out(_dim("(no deals yet -- ingest one with `contract-vault ingest <file>`)"))
+        return EXIT_OK
+    for rid, _d, rec in records:
+        exp = rec.get("expiration_date") or "-"
+        cp = primary_counterparty(rec)
+        _out(f"{_bold(rid)}  {_dim('exp')} {exp}  {_dim('cp')} {cp}")
+    _out(_dim(f"{len(records)} deal(s)"))
+    return EXIT_OK
+
+
+def cmd_get(args: argparse.Namespace) -> int:
+    vault = resolve_vault(args)
+    rid, _dir, rec = find_deal(vault, args.id)
+    if getattr(args, "json", False):
+        _emit_json(rec)
+        return EXIT_OK
+    _out(_bold(rid))
+    _out(f"  title:           {rec.get('title')}")
+    _out(f"  status:          {rec.get('status')}  signed_on {rec.get('signed_on')}")
+    _out(f"  parties:         " + ", ".join(f"{p.get('name')} ({p.get('role') or 'party'})" for p in rec.get("parties", [])))
+    _out(f"  effective:       {rec.get('effective_date')}")
+    _out(f"  expiration:      {rec.get('expiration_date')}")
+    term = rec.get("term", {})
+    _out(f"  term:            length={term.get('length')} auto_renew={term.get('auto_renew')} notice_days={term.get('notice_period_days')}")
+    if term.get("renewal_window"):
+        rw = term["renewal_window"]
+        _out(f"  renewal window:  notice by {rw.get('deadline')} (expires {rw.get('expiration')})")
+    _out(f"  governing law:   {rec.get('governing_law')}")
+    val = rec.get("value", {})
+    _out(f"  value:           {val.get('raw')} (amount={val.get('amount')} {val.get('currency') or ''})")
+    src = rec.get("source", {})
+    _out(f"  source:          {src.get('path')} [{src.get('format')}] sha256={str(src.get('sha256'))[:12]} vaulted={src.get('vaulted')}")
+    obs = rec.get("obligations", [])
+    if obs:
+        _out("  obligations:")
+        for ob in obs:
+            _out(f"    - [{ob.get('type')}] due {ob.get('due') or '-'}  {ob.get('description')}  ({ob.get('source')}, conf {ob.get('confidence')})")
+    prov = rec.get("provenance", {})
+    _out(_dim(f"  provenance:      from_extract={prov.get('from_extract')} extractor={prov.get('extractor_version')} ingested {prov.get('ingested_at')}"))
+    return EXIT_OK
+
+
+def cmd_find(args: argparse.Namespace) -> int:
+    vault = resolve_vault(args)
+    records = load_all_records(vault)
+    exp_before = parse_date(args.expiring_before) if getattr(args, "expiring_before", None) else None
+    if getattr(args, "expiring_before", None) and exp_before is None:
+        raise UsageError(f"invalid --expiring-before date: {args.expiring_before!r}")
+    results: List[Tuple[str, Path, JSONObj]] = []
+    for rid, d, rec in records:
+        if args.counterparty:
+            if args.counterparty.lower() not in " ".join(str(p.get("name", "")) for p in rec.get("parties", [])).lower():
+                continue
+        if args.governing_law:
+            if args.governing_law.lower() not in str(rec.get("governing_law") or "").lower():
+                continue
+        if exp_before is not None:
+            exp = parse_date(rec.get("expiration_date"))
+            if exp is None or exp >= exp_before:
+                continue
+        if getattr(args, "value_gt", None) is not None:
+            amount = rec.get("value", {}).get("amount")
+            if not isinstance(amount, (int, float)) or amount <= args.value_gt:
+                continue
+        if getattr(args, "auto_renew", False):
+            if rec.get("term", {}).get("auto_renew") is not True:
+                continue
+        if args.text:
+            if args.text.lower() not in record_searchable_text(rec):
+                continue
+        results.append((rid, d, rec))
+    _why(
+        args,
+        "find",
+        f"scanned={len(records)} matched={len(results)}",
+        "filters="
+        + " ".join(
+            f"{k}={v}"
+            for k, v in (
+                ("counterparty", args.counterparty),
+                ("governing_law", args.governing_law),
+                ("expiring_before", getattr(args, "expiring_before", None)),
+                ("value_gt", getattr(args, "value_gt", None)),
+                ("auto_renew", getattr(args, "auto_renew", False)),
+                ("text", args.text),
+            )
+            if v
+        )
+        or "(none)",
+    )
+    if getattr(args, "json", False):
+        _emit_json(
+            {
+                "count": len(results),
+                "deals": [
+                    {
+                        "id": rid,
+                        "title": rec.get("title"),
+                        "counterparty": primary_counterparty(rec),
+                        "expiration_date": rec.get("expiration_date"),
+                        "governing_law": rec.get("governing_law"),
+                        "value": rec.get("value", {}).get("amount"),
+                        "currency": rec.get("value", {}).get("currency"),
+                        "auto_renew": rec.get("term", {}).get("auto_renew"),
+                    }
+                    for rid, _d, rec in results
+                ],
+            }
+        )
+        return EXIT_OK
+    if not results:
+        _out(_dim("(no matches)"))
+        return EXIT_OK
+    for rid, _d, rec in results:
+        _out(f"{_bold(rid)}  exp {rec.get('expiration_date') or '-'}  law {rec.get('governing_law') or '-'}")
+    return EXIT_OK
+
+
+def cmd_due(args: argparse.Namespace) -> int:
+    vault = resolve_vault(args)
+    within = parse_within(args.within) if getattr(args, "within", None) else DEFAULT_WITHIN_DAYS
+    as_of = parse_date(args.as_of) if getattr(args, "as_of", None) else dt.date.today()
+    if getattr(args, "as_of", None) and as_of is None:
+        raise UsageError(f"invalid --as-of date: {args.as_of!r}")
+    assert as_of is not None
+    rows = upcoming_obligations(vault, within_days=within, as_of=as_of)
+    fmt = getattr(args, "format", None) or ("json" if getattr(args, "json", False) else "table")
+    if getattr(args, "json", False):
+        fmt = "json"
+    _why(args, "due", f"as_of={as_of.isoformat()}", f"within_days={within}", f"actions={len(rows)}", f"format={fmt}")
+    if fmt == "ics":
+        sys.stdout.write(build_ics(rows))
+        return EXIT_OK
+    if fmt == "json":
+        _emit_json(
+            {
+                "generated_at": _now_iso(),
+                "as_of": as_of.isoformat(),
+                "within_days": within,
+                "count": len(rows),
+                "obligations": rows,
+            }
+        )
+        return EXIT_OK
+    # table
+    if not rows:
+        _out(_dim(f"(no obligations due within {within} days as of {as_of.isoformat()})"))
+        return EXIT_OK
+    _out(_bold(f"Upcoming obligations within {within} days (as of {as_of.isoformat()}):"))
+    for r in rows:
+        when = _yellow(r["due"]) if r["days_until"] <= 14 else r["due"]
+        _out(f"  {when}  (+{r['days_until']}d)  {_bold(str(r['type']))}  {r['counterparty']}  -- {r['description']}")
+    return EXIT_OK
+
+
+def cmd_stats(args: argparse.Namespace) -> int:
+    vault = resolve_vault(args)
+    records = load_all_records(vault)
+    today = parse_date(args.as_of) if getattr(args, "as_of", None) else dt.date.today()
+    if getattr(args, "as_of", None) and today is None:
+        raise UsageError(f"invalid --as-of date: {args.as_of!r}")
+    assert today is not None
+    soon = today + dt.timedelta(days=DEFAULT_WITHIN_DAYS)
+    by_counterparty: Dict[str, int] = {}
+    by_law: Dict[str, int] = {}
+    totals: Dict[str, float] = {}
+    expiring_soon = 0
+    auto_renew = 0
+    for _rid, _d, rec in records:
+        cp = primary_counterparty(rec)
+        by_counterparty[cp] = by_counterparty.get(cp, 0) + 1
+        law = rec.get("governing_law") or "(unspecified)"
+        by_law[law] = by_law.get(law, 0) + 1
+        val = rec.get("value", {})
+        amount = val.get("amount")
+        if isinstance(amount, (int, float)) and not isinstance(amount, bool):
+            cur = val.get("currency") or "(unknown)"
+            totals[cur] = totals.get(cur, 0.0) + float(amount)
+        exp = parse_date(rec.get("expiration_date"))
+        if exp is not None and today <= exp <= soon:
+            expiring_soon += 1
+        if rec.get("term", {}).get("auto_renew") is True:
+            auto_renew += 1
+    payload = {
+        "vault": str(vault),
+        "count": len(records),
+        "total_value": {k: round(v, 2) for k, v in sorted(totals.items())},
+        "expiring_within_90d": expiring_soon,
+        "auto_renew_count": auto_renew,
+        "by_counterparty": dict(sorted(by_counterparty.items(), key=lambda kv: (-kv[1], kv[0]))),
+        "by_governing_law": dict(sorted(by_law.items(), key=lambda kv: (-kv[1], kv[0]))),
+    }
+    if getattr(args, "json", False):
+        _emit_json(payload)
+        return EXIT_OK
+    _out(_bold(f"Portfolio: {payload['count']} deal(s)"))
+    if totals:
+        _out("  total value: " + ", ".join(f"{round(v, 2)} {k}" for k, v in sorted(totals.items())))
+    _out(f"  expiring within 90d: {expiring_soon}    auto-renewing: {auto_renew}")
+    if by_counterparty:
+        _out("  by counterparty:")
+        for cp, n in sorted(by_counterparty.items(), key=lambda kv: (-kv[1], kv[0])):
+            _out(f"    {n:>3}  {cp}")
+    if by_law:
+        _out("  by governing law:")
+        for law, n in sorted(by_law.items(), key=lambda kv: (-kv[1], kv[0])):
+            _out(f"    {n:>3}  {law}")
+    return EXIT_OK
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    vault = resolve_vault(args)
+    findings: List[str] = []
+    checked = 0
+    for rid, d, rec in load_all_records(vault):
+        src = rec.get("source", {})
+        if src.get("vaulted") and src.get("path") and src.get("sha256"):
+            f = d / str(src["path"])
+            if not f.exists():
+                findings.append(f"{rid}: vaulted source missing ({src['path']})")
+                continue
+            actual = sha256_file(f)
+            checked += 1
+            if actual != src["sha256"]:
+                findings.append(f"{rid}: sha256 mismatch (stored {str(src['sha256'])[:12]}, actual {actual[:12]})")
+    dirty = ""
+    if (vault / ".git").exists():
+        status = _git(vault, "status", "--porcelain", check=False)
+        dirty = status.stdout.strip()
+        if dirty:
+            findings.append(f"git working tree not clean ({len(dirty.splitlines())} change(s))")
+    ok = not findings
+    _why(args, "verify", f"records={len(load_all_records(vault))}", f"sha_checked={checked}", f"git_dirty={bool(dirty)}")
+    if getattr(args, "json", False):
+        _emit_json({"ok": ok, "checked": checked, "findings": findings})
+    elif ok:
+        _out(_green(f"OK -- {checked} source file(s) verified, git tree clean"))
+    else:
+        for msg in findings:
+            _eprint(_red(f"FAIL: {msg}"))
+    return EXIT_OK if ok else EXIT_FAIL
+
+
+def cmd_demo(args: argparse.Namespace) -> int:
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="contract-vault-demo-") as tmp:
+        vault = Path(tmp) / "vault"
+        ns = argparse.Namespace(path=str(vault), json=False, why=getattr(args, "why", False))
+        cmd_init(ns)
+        _out("")
+        _out(_bold("1) Ingest bundled extract-cli sample payloads (no extract-cli needed):"))
+        for name, payload in DEMO_EXTRACTS:
+            deal, created = store_record(
+                vault, json.loads(json.dumps(payload)),
+                counterparty_override=None, name_override=None, local_source=None,
+            )
+            _out(f"   - {('ingested' if created else 'skipped')} {deal}")
+        _out("")
+        _out(_bold("2) find --auto-renew --value-gt 50000:"))
+        find_ns = argparse.Namespace(
+            vault=str(vault), json=False, why=False, counterparty=None, governing_law=None,
+            expiring_before=None, value_gt=50000.0, auto_renew=True, text=None,
+        )
+        cmd_find(find_ns)
+        _out("")
+        _out(_bold("3) due --within 365d (table):"))
+        due_ns = argparse.Namespace(vault=str(vault), json=False, why=False, within="365d", as_of="2026-01-01", format="table")
+        cmd_due(due_ns)
+        _out("")
+        _out(_bold("4) due --within 365d --format ics  (first lines):"))
+        ics = build_ics(upcoming_obligations(vault, within_days=365, as_of=dt.date(2026, 1, 1)))
+        for line in ics.split("\r\n")[:8]:
+            _out(f"   {line}")
+        _out("")
+        _out(_green("Demo complete. This entire flow is deterministic and ran without extract-cli or any LLM."))
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# Hidden shell completion: `contract-vault __complete <words...>`
+# ---------------------------------------------------------------------------
+
+SUBCOMMANDS = [
+    "init", "ingest", "list", "get", "show", "find", "search",
+    "due", "obligations", "stats", "verify", "demo",
+]
+FIND_FLAGS = [
+    "--counterparty", "--governing-law", "--expiring-before",
+    "--value-gt", "--auto-renew", "--text", "--json",
+]
+
+
+def cmd_complete(words: Sequence[str]) -> int:
+    """Emit completion candidates (one per line). Never raises; silent on any error."""
+    try:
+        words = list(words)
+        current = words[-1] if words else ""
+        sub = words[0] if words else ""
+        candidates: List[str] = []
+        if len(words) <= 1:
+            candidates = SUBCOMMANDS
+        elif sub in ("get", "show", "verify"):
+            try:
+                vault = resolve_vault(argparse.Namespace())
+                candidates = [rid for rid, _d, _r in load_all_records(vault)]
+            except VaultError:
+                candidates = []
+        elif sub in ("find", "search"):
+            candidates = list(FIND_FLAGS)
+            try:
+                vault = resolve_vault(argparse.Namespace())
+                candidates += sorted({primary_counterparty(r) for _i, _d, r in load_all_records(vault)})
+                candidates += sorted({str(r.get("governing_law")) for _i, _d, r in load_all_records(vault) if r.get("governing_law")})
+            except VaultError:
+                pass
+        elif sub in ("due", "obligations"):
+            candidates = ["--within", "--format", "--as-of", "--json", "ics", "json", "table", "30d", "60d", "90d"]
+        for c in candidates:
+            if c.startswith(current):
+                print(c)
+        return EXIT_OK
+    except Exception:  # completion must never break a shell session
+        return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# Bundled demo payloads (valid extract-cli output; let demo/tests run offline)
+# ---------------------------------------------------------------------------
+
+
+def _demo_field(value: Any, conf: float = 0.95, source: str = SOURCE_DETERMINISTIC) -> JSONObj:
+    return {"value": value, "confidence": conf, "source": source}
+
+
+DEMO_EXTRACTS: List[Tuple[str, JSONObj]] = [
+    (
+        "acme-msa",
+        {
+            "document": {
+                "title": "Master Services Agreement",
+                "format": "pdf",
+                "sha256": "a" * 64,
+                "source_path": "/contracts/acme-msa.pdf",
+            },
+            "parties": [
+                {"name": "Acme Corporation", "role": "Customer", "confidence": 0.98, "source": SOURCE_DETERMINISTIC},
+                {"name": "Globex LLC", "role": "Provider", "confidence": 0.97, "source": SOURCE_DETERMINISTIC},
+            ],
+            "dates": {
+                "effective": _demo_field("2025-03-01"),
+                "expiration": _demo_field("2026-02-28"),
+            },
+            "term": {
+                "length": _demo_field("1 year"),
+                "auto_renew": _demo_field(True),
+                "notice_period_days": _demo_field(60),
+            },
+            "governing_law": _demo_field("Delaware"),
+            "clauses": [],
+            "defined_terms": [],
+            "value": _demo_field("$120,000"),
+            "obligations": [
+                {"text": "Customer shall pay the annual fee by 2025-04-15.", "confidence": 0.8, "source": SOURCE_DETERMINISTIC},
+            ],
+            "_meta": {"extractor_version": "extract-cli 1.4.0", "tiers_used": ["deterministic"], "llm_used": False},
+        },
+    ),
+    (
+        "initech-nda",
+        {
+            "document": {
+                "title": "Mutual Non-Disclosure Agreement",
+                "format": "docx",
+                "sha256": "b" * 64,
+                "source_path": "/contracts/initech-nda.docx",
+            },
+            "parties": [
+                {"name": "Initech Inc", "role": "Disclosing Party", "confidence": 0.95, "source": SOURCE_DETERMINISTIC},
+            ],
+            "dates": {
+                "effective": _demo_field("2025-06-15"),
+                "expiration": _demo_field("2027-06-14"),
+            },
+            "term": {
+                "length": _demo_field("2 years"),
+                "auto_renew": _demo_field(False),
+                "notice_period_days": _demo_field(None, 0.0, SOURCE_NONE),
+            },
+            "governing_law": _demo_field("California"),
+            "clauses": [],
+            "defined_terms": [],
+            "value": _demo_field(None, 0.0, SOURCE_NONE),
+            "_meta": {"extractor_version": "extract-cli 1.4.0", "tiers_used": ["deterministic"], "llm_used": False},
+        },
+    ),
+]
+
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+
+
+def _add_common(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--vault", metavar="DIR", help="vault directory (default: discover upward / $CONTRACT_VAULT_DIR)")
+    p.add_argument("--json", action="store_true", help="machine-readable JSON on stdout")
+    p.add_argument("--why", action="store_true", help="structured explanation on stderr")
+    p.add_argument("--no-color", action="store_true", help="disable ANSI color (also honors NO_COLOR/FORCE_COLOR)")
+    p.add_argument("-q", "--quiet", "--silent", dest="quiet", action="store_true", help="suppress non-error output")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="contract-vault",
+        description="Register, search and surface deadlines for SIGNED contracts (the manage-out end of the contract-ops suite).",
+    )
+    parser.add_argument("-V", "--version", action="version", version=f"contract-vault {__version__}")
+    parser.add_argument("--no-color", action="store_true", help="disable ANSI color")
+    sub = parser.add_subparsers(dest="command", metavar="<command>")
+
+    p_init = sub.add_parser("init", help="create / initialize an executed-contract vault")
+    _add_common(p_init)
+    p_init.add_argument("path", nargs="?", help="vault directory (default: current directory)")
+    p_init.set_defaults(func=cmd_init)
+
+    p_ing = sub.add_parser("ingest", help="ingest extract-cli JSON (shell out to `extract`, or read piped JSON via '-')")
+    _add_common(p_ing)
+    p_ing.add_argument("file", help="document to extract+store, a '.json' extract payload, or '-' for piped JSON")
+    p_ing.add_argument("--counterparty", help="override counterparty (folder); default: first party")
+    p_ing.add_argument("--name", help="override deal name (folder); default: document title")
+    p_ing.add_argument("--llm", action="store_true", help="forward --llm to the extract step (opt-in; delegated)")
+    p_ing.set_defaults(func=cmd_ingest)
+
+    p_list = sub.add_parser("list", help="list stored deals")
+    _add_common(p_list)
+    p_list.set_defaults(func=cmd_list)
+
+    for alias in ("get", "show"):
+        p_get = sub.add_parser(alias, help="print one stored record")
+        _add_common(p_get)
+        p_get.add_argument("id", help="deal id (path, leaf name, or unique prefix)")
+        p_get.set_defaults(func=cmd_get)
+
+    for alias in ("find", "search"):
+        p_find = sub.add_parser(alias, help="query deals by any field")
+        _add_common(p_find)
+        p_find.add_argument("text", nargs="?", help="full-text query")
+        p_find.add_argument("--counterparty", help="match counterparty / party name")
+        p_find.add_argument("--governing-law", dest="governing_law", help="match governing law")
+        p_find.add_argument("--expiring-before", dest="expiring_before", metavar="DATE", help="expiration date before DATE")
+        p_find.add_argument("--value-gt", dest="value_gt", type=float, metavar="N", help="value amount greater than N")
+        p_find.add_argument("--auto-renew", dest="auto_renew", action="store_true", help="only auto-renewing deals")
+        p_find.set_defaults(func=cmd_find)
+
+    for alias in ("due", "obligations"):
+        p_due = sub.add_parser(alias, help="project upcoming date/obligation actions (ics|json|table)")
+        _add_common(p_due)
+        p_due.add_argument("--within", default="90d", help="window, e.g. 30d/60d/90d (default 90d)")
+        p_due.add_argument("--format", choices=["ics", "json", "table"], help="output format (default table; --json forces json)")
+        p_due.add_argument("--as-of", dest="as_of", metavar="DATE", help="reference 'today' (default: actual today)")
+        p_due.set_defaults(func=cmd_due)
+
+    p_stats = sub.add_parser("stats", help="portfolio statistics")
+    _add_common(p_stats)
+    p_stats.add_argument("--as-of", dest="as_of", metavar="DATE", help="reference 'today' for 'expiring soon' (default: actual today)")
+    p_stats.set_defaults(func=cmd_stats)
+
+    p_verify = sub.add_parser("verify", help="integrity check (source sha256 + git state)")
+    _add_common(p_verify)
+    p_verify.set_defaults(func=cmd_verify)
+
+    p_demo = sub.add_parser("demo", help="run the full ingest->find->due flow on bundled fixtures")
+    _add_common(p_demo)
+    p_demo.set_defaults(func=cmd_demo)
+
+    return parser
+
+
+def _set_output_flags(args: argparse.Namespace) -> None:
+    global _NO_COLOR, _QUIET
+    if getattr(args, "no_color", False):
+        _NO_COLOR = True
+    if getattr(args, "quiet", False):
+        _QUIET = True
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    _configure_streams()
+
+    # Hidden completion handled before argparse so partial/odd args never error.
+    if argv and argv[0] == "__complete":
+        return cmd_complete(argv[1:])
+
+    parser = build_parser()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        code = exc.code
+        return int(code) if isinstance(code, int) else (EXIT_OK if code is None else EXIT_USAGE)
+
+    _set_output_flags(args)
+
+    if not getattr(args, "command", None) or not hasattr(args, "func"):
+        parser.print_help()
+        return EXIT_USAGE
+
+    try:
+        return int(args.func(args))
+    except UsageError as exc:
+        _eprint(_red(f"error: {exc}"))
+        return EXIT_USAGE
+    except NotFoundError as exc:
+        _eprint(_red(f"error: {exc}"))
+        return EXIT_FAIL
+    except VaultError as exc:
+        _eprint(_red(f"error: {exc}"))
+        return EXIT_FAIL
+    except BrokenPipeError:
+        try:
+            sys.stdout.close()
+        except Exception:
+            pass
+        return EXIT_OK
+    except KeyboardInterrupt:
+        _eprint("interrupted")
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())
