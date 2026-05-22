@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }} · py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install (editable + dev extras)
+        run: python -m pip install -e ".[dev]"
+      - name: Run tests
+        run: python -m pytest -q
+      - name: Locale-safe / ASCII output check (UTF-8 disabled)
+        if: runner.os != 'Windows'
+        run: |
+          LC_ALL=C LANG=C python contract_vault_cli.py demo > /dev/null
+          LC_ALL=C LANG=C python contract_vault_cli.py --version
+
+  typecheck:
+    name: mypy --strict
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e ".[dev]"
+      - run: python -m mypy --strict contract_vault_cli.py
+
+  spec-check:
+    name: schema conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e ".[dev]"
+      - name: Validate fixtures + outputs against docs/spec (offline)
+        run: python -m pytest tests/test_schema_conformance.py -q
+      - name: Check vendored extract schema against upstream HEAD (non-blocking)
+        continue-on-error: true
+        run: |
+          curl -fsSL -o /tmp/upstream.json \
+            https://raw.githubusercontent.com/DrBaher/extract-cli/HEAD/docs/spec/extract-output.schema.json
+          python - <<'PY'
+          import json
+          up = json.load(open("/tmp/upstream.json"))
+          ours = json.load(open("tests/vendor/extract-output.schema.json"))
+          if up.get("properties", {}).keys() != ours.get("properties", {}).keys():
+              print("::warning::vendored extract-output schema may have drifted from upstream HEAD")
+          else:
+              print("vendored extract schema matches upstream property set")
+          PY
+
+  build-smoke:
+    name: build + wheel smoke install
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install build
+      - name: Build wheel + sdist
+        run: python -m build
+      - name: Smoke-install the wheel in a clean venv and run it
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/python -m pip install --upgrade pip
+          /tmp/smoke/bin/python -m pip install dist/*.whl
+          /tmp/smoke/bin/contract-vault --version
+          /tmp/smoke/bin/contract-vault demo > /dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/*
