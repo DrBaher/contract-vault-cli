@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/DrBaher/extract-cli/blob/main/docs/spec/extract-output.schema.json",
-  "title": "extract-cli output schema (v1)",
-  "description": "VENDORED COPY (do not edit by hand) of the extract-cli output schema -- the INPUT CONTRACT consumed by `contract-vault ingest`. Refreshed from https://raw.githubusercontent.com/DrBaher/extract-cli/HEAD/docs/spec/extract-output.schema.json. Structured payload emitted by `extract <path>` (default JSON output). Every extracted field carries a confidence and a source in {deterministic, llm, none}: downstream treats fields as 'verify, not trust'.",
+  "title": "extract-cli output: the subset contract-vault relies on (v1)",
+  "description": "The INPUT CONTRACT consumed by `contract-vault ingest`, framed as the SUBSET of extract-cli output that contract-vault depends on. extract-cli's full published schema has grown additional fields (e.g. jurisdiction, amounts, signatories) which contract-vault tolerates and ignores -- so additionalProperties is true here on purpose: we require the fields we read to be present and well-typed, and accept any extras. Every field carries a confidence and a source in {deterministic, llm, none}; downstream treats fields as 'verify, not trust'.",
   "type": "object",
   "required": [
     "document",
@@ -15,7 +15,7 @@
     "value",
     "_meta"
   ],
-  "additionalProperties": false,
+  "additionalProperties": true,
   "$defs": {
     "source": {
       "enum": [

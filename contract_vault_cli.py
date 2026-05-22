@@ -41,7 +41,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -95,14 +95,37 @@ class UsageError(VaultError):
 
 
 def _configure_streams() -> None:
-    """Force UTF-8 on stdout/stderr regardless of locale (macOS CI safety)."""
+    """Force UTF-8 on stdout/stderr regardless of locale, and disable newline translation.
+
+    newline="" stops Windows text mode from rewriting "\\n" to "\\r\\n" — which would
+    otherwise turn the RFC 5545 "\\r\\n" line endings emitted by `due --format ics` into
+    "\\r\\r\\n" and corrupt the calendar. On POSIX this is a no-op.
+    """
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
         if callable(reconfigure):
             try:
-                reconfigure(encoding="utf-8")
+                reconfigure(encoding="utf-8", newline="")
             except (ValueError, OSError):
                 pass
+
+
+def _rmtree_force(path: str) -> None:
+    """Best-effort recursive delete that clears read-only bits (Windows keeps git's
+    .git/objects read-only, which makes a plain rmtree fail). Never raises."""
+    for attempt in (1, 2):
+        try:
+            shutil.rmtree(path)
+            return
+        except OSError:
+            if attempt == 2:
+                return  # give up gracefully; the OS temp cleaner will reclaim it
+            for root, dirs, files in os.walk(path):
+                for name in dirs + files:
+                    try:
+                        os.chmod(os.path.join(root, name), 0o700)
+                    except OSError:
+                        pass
 
 
 def _color_enabled(stream: Any = None) -> bool:
@@ -2288,7 +2311,8 @@ def cmd_config(args: argparse.Namespace) -> int:
 def cmd_demo(args: argparse.Namespace) -> int:
     import tempfile
 
-    with tempfile.TemporaryDirectory(prefix="contract-vault-demo-") as tmp:
+    tmp = tempfile.mkdtemp(prefix="contract-vault-demo-")
+    try:
         vault = Path(tmp) / "vault"
         ns = argparse.Namespace(path=str(vault), json=False, why=getattr(args, "why", False))
         cmd_init(ns)
@@ -2318,6 +2342,8 @@ def cmd_demo(args: argparse.Namespace) -> int:
             _out(f"   {line}")
         _out("")
         _out(_green("Demo complete. This entire flow is deterministic and ran without extract-cli or any LLM."))
+    finally:
+        _rmtree_force(tmp)
     return EXIT_OK
 
 

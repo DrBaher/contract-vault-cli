@@ -6,6 +6,24 @@ All notable changes to **contract-vault** are documented here. The format follow
 semver-meaningful: backward-incompatible record/output changes require a major bump;
 new optional fields are minor additions.
 
+## [0.4.2] - 2026-05-22
+
+### Changed (hardening for adoption — no new commands)
+- **Validated against the real extract-cli (0.1.14) for the first time.** New integration
+  tests drive the entry point against a real `extract` shim on PATH (subprocess shell-out,
+  `--llm` forwarding, the "extract missing" error) and ingest *captured real* extract-cli
+  output. Confirmed contract-vault ingests it cleanly — empty parties / null fields are
+  extract's deterministic-tier limits (improve with `--llm`) and are surfaced via `review`.
+- **Tolerate extract-cli's evolving output.** The published tool emits fields contract-vault
+  doesn't consume (`jurisdiction`, `amounts`, `signatories`); these are ignored at runtime.
+  The vendored input schema is reframed as *the subset contract-vault relies on*
+  (`additionalProperties: true`), with a regression test that unknown fields are tolerated.
+- **Windows support.** `due --format ics` no longer risks `\r\r\n` on Windows (stdout newline
+  translation disabled); `demo`'s temp cleanup clears read-only git files. **CI now also runs
+  on `windows-latest`** (Ubuntu × macOS × Py 3.9–3.12, plus Windows on 3.12).
+- Verified the `[pdf]`/`[docx]`/`[llm]` extras actually resolve (extract-cli is on PyPI with
+  matching extras). 206 tests.
+
 ## [0.4.1] - 2026-05-22
 
 ### Docs
@@ -237,6 +255,7 @@ Initial release: the post-signature management layer of the contract-ops CLI sui
   tests dependency-free; fixtures vendor sample extract JSON so the suite runs offline and
   without extract-cli installed. Property tests use stdlib `random.Random(seed)`.
 
+[0.4.2]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.4.2
 [0.4.1]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.4.1
 [0.4.0]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.4.0
 [0.3.1]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.3.1

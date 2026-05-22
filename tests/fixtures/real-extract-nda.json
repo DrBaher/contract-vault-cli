@@ -1,0 +1,135 @@
+{
+  "document": {
+    "title": "Mutual Non-Disclosure Agreement",
+    "format": "markdown",
+    "sha256": "b6757046cc26f81653f0893cf62312a451ac2dd0919abdb3223bbb5129090525",
+    "source_path": "sample-nda.md"
+  },
+  "parties": [],
+  "dates": {
+    "effective": {
+      "value": "2026-03-01",
+      "confidence": 0.85,
+      "source": "deterministic"
+    },
+    "expiration": {
+      "value": null,
+      "confidence": 0.0,
+      "source": "none"
+    }
+  },
+  "term": {
+    "length": {
+      "value": "60 days",
+      "confidence": 0.7,
+      "source": "deterministic"
+    },
+    "auto_renew": {
+      "value": true,
+      "confidence": 0.7,
+      "source": "deterministic"
+    },
+    "notice_period_days": {
+      "value": 60,
+      "confidence": 0.7,
+      "source": "deterministic"
+    }
+  },
+  "governing_law": {
+    "value": "State of Delaware",
+    "confidence": 0.85,
+    "source": "deterministic"
+  },
+  "jurisdiction": {
+    "value": "US-DE",
+    "confidence": 0.8,
+    "source": "deterministic"
+  },
+  "clauses": [
+    {
+      "canonical_title": "Term",
+      "detected_title": "## Term",
+      "tier": "h2",
+      "span": {
+        "start": 230,
+        "end": 430
+      },
+      "confidence": 0.95,
+      "source": "deterministic",
+      "mapped": true
+    },
+    {
+      "canonical_title": "Governing Law",
+      "detected_title": "## Governing Law",
+      "tier": "h2",
+      "span": {
+        "start": 430,
+        "end": 519
+      },
+      "confidence": 0.95,
+      "source": "deterministic",
+      "mapped": true
+    },
+    {
+      "canonical_title": "Payment",
+      "detected_title": "## Consideration",
+      "tier": "h2",
+      "span": {
+        "start": 519,
+        "end": 575
+      },
+      "confidence": 0.95,
+      "source": "deterministic",
+      "mapped": true
+    },
+    {
+      "canonical_title": "Restrictions",
+      "detected_title": "## Obligations",
+      "tier": "h2",
+      "span": {
+        "start": 575,
+        "end": 669
+      },
+      "confidence": 0.95,
+      "source": "deterministic",
+      "mapped": true
+    }
+  ],
+  "defined_terms": [
+    {
+      "term": "Agreement",
+      "confidence": 0.6,
+      "source": "deterministic"
+    },
+    {
+      "term": "Disclosing Party",
+      "confidence": 0.6,
+      "source": "deterministic"
+    },
+    {
+      "term": "Receiving Party",
+      "confidence": 0.6,
+      "source": "deterministic"
+    }
+  ],
+  "value": {
+    "value": "$250,000",
+    "confidence": 0.6,
+    "source": "deterministic"
+  },
+  "amounts": [
+    {
+      "value": "$250,000",
+      "confidence": 0.6,
+      "source": "deterministic"
+    }
+  ],
+  "signatories": [],
+  "_meta": {
+    "extractor_version": "0.1.14",
+    "tiers_used": [
+      "deterministic"
+    ],
+    "llm_used": false
+  }
+}
