@@ -111,6 +111,7 @@ is idempotent.
 | `due` / `obligations` | Project upcoming actions. `--within 30d\|60d\|90d`, `--format ics\|json\|table`. Emits valid RFC 5545 `.ics`. |
 | `stats` | Portfolio stats: count, total value, expiring soon, by counterparty / governing law. |
 | `verify` | Integrity check: source `sha256` matches + git tree clean. |
+| `review` | Deterministic worklist of fields that are unidentified / LLM-derived / low-confidence (`--threshold`). Never calls an LLM. |
 | `demo` | Run the full flow on bundled fixtures (no extract-cli, no LLM). |
 
 ### Global I/O conventions (shared across the suite)
@@ -165,11 +166,25 @@ contract-vault uses the hidden-subcommand style.)
 
 ---
 
-## LLM (opt-in, delegated)
+## LLM (opt-in, delegated) and "verify, not trust"
 
-contract-vault never calls an LLM itself. `ingest --llm` simply forwards `--llm` to the
-`extract` step. Shared config is looked up at `~/.config/contract-ops/llm.json` first,
-then `./config/llm.json`. See [`config/llm.json.example`](config/llm.json.example).
+contract-vault never calls an LLM itself. Identification of clauses and fields — including
+the LLM fallback for anything the deterministic tiers miss — is the job of
+[`extract-cli`](https://github.com/DrBaher/extract-cli). `ingest --llm` simply forwards
+`--llm` to the `extract` step, which runs that LLM tier; shared config is looked up at
+`~/.config/contract-ops/llm.json` first, then `./config/llm.json`
+(see [`config/llm.json.example`](config/llm.json.example)). The register / `due` / `.ics`
+paths stay fully deterministic and work with the LLM off.
+
+Every field contract-vault stores carries its `source`
+(`deterministic` | `llm` | `manual` | `none`) and a `confidence`. `review` surfaces the
+ones worth a human look — without calling a model:
+
+```bash
+contract-vault review                       # unidentified / llm-derived / low-confidence fields
+contract-vault find --needs-review --json   # which deals need attention
+extract deal.pdf --json --llm | contract-vault ingest -   # improve them at extraction time
+```
 
 ---
 

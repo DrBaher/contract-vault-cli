@@ -6,6 +6,24 @@ All notable changes to **contract-vault** are documented here. The format follow
 semver-meaningful: backward-incompatible record/output changes require a major bump;
 new optional fields are minor additions.
 
+## [0.1.4] - 2026-05-22
+
+### Added — surfacing provenance ("verify, not trust")
+- **`review` command** — a deterministic worklist of fields that are unidentified
+  (`source=none`), LLM-derived (`source=llm`), or low-confidence (`< --threshold`,
+  default 0.6), across the whole vault. Pure inspection of stored provenance; **it never
+  calls an LLM**. To *improve* flagged fields, re-ingest with `ingest --llm`, which
+  delegates the LLM work to extract-cli (where clause/field identification lives).
+- **`find --needs-review`** — filter the register to deals that have review flags.
+- **`ingest --why`** now reports a per-record provenance breakdown
+  (deterministic / llm / unidentified field counts, `llm_used`, needs-review count).
+- **`stats`** gains `llm_used_count` and `needs_review_count`; **`get`** shows `llm_used`
+  and a needs-review line.
+
+Note: clause identification (incl. the LLM tier) remains an extract-cli responsibility;
+contract-vault stores signed instances (parties/dates/obligations), not clauses, and keeps
+the register/ics path fully deterministic with the LLM off.
+
 ## [0.1.3] - 2026-05-22
 
 ### Changed (parsing robustness — hardening the limitations surfaced by the stress test)
@@ -92,6 +110,7 @@ Initial release: the post-signature management layer of the contract-ops CLI sui
   tests dependency-free; fixtures vendor sample extract JSON so the suite runs offline and
   without extract-cli installed. Property tests use stdlib `random.Random(seed)`.
 
+[0.1.4]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.4
 [0.1.3]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.3
 [0.1.2]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.2
 [0.1.1]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.1

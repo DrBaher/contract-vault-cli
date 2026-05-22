@@ -35,7 +35,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -838,6 +838,55 @@ def primary_counterparty(record: JSONObj) -> str:
     return "(unknown)"
 
 
+REVIEW_THRESHOLD = 0.6
+
+
+def review_flags(record: JSONObj, threshold: float = REVIEW_THRESHOLD) -> List[JSONObj]:
+    """Deterministic 'verify, not trust' worklist for a record.
+
+    Flags fields that are unidentified (source=none), LLM-derived (source=llm), or
+    low-confidence (< threshold). Pure inspection of the provenance contract-vault already
+    stores -- it NEVER calls an LLM. To *improve* flagged fields, re-ingest with
+    `ingest --llm`, which delegates the LLM work to extract-cli.
+    """
+    out: List[JSONObj] = []
+
+    def consider(field: str, source: Any, confidence: Any) -> None:
+        src = str(source or SOURCE_NONE)
+        conf = float(confidence) if isinstance(confidence, (int, float)) and not isinstance(confidence, bool) else 0.0
+        reasons: List[str] = []
+        if src == SOURCE_NONE:
+            reasons.append("unidentified")
+        elif src == SOURCE_LLM:
+            reasons.append("llm-derived")
+        if src != SOURCE_NONE and conf < threshold:
+            reasons.append(f"low-confidence({round(conf, 2)})")
+        if reasons:
+            out.append({"field": field, "source": src, "confidence": round(conf, 4), "reasons": reasons})
+
+    for name, meta in (record.get("field_meta") or {}).items():
+        if isinstance(meta, dict):
+            consider(name, meta.get("source"), meta.get("confidence"))
+    for i, party in enumerate(record.get("parties", [])):
+        if isinstance(party, dict):
+            consider(f"parties[{i}]:{party.get('name', '?')}", party.get("source"), party.get("confidence"))
+    for ob in record.get("obligations", []):
+        if isinstance(ob, dict) and ob.get("type") == "obligation":
+            desc = str(ob.get("description", ""))[:40]
+            consider(f"obligation:{desc}", ob.get("source"), ob.get("confidence"))
+    return out
+
+
+def provenance_summary(record: JSONObj) -> Dict[str, int]:
+    """Count field_meta entries by source -- the basis for the ingest --why breakdown."""
+    counts = {SOURCE_DETERMINISTIC: 0, SOURCE_LLM: 0, SOURCE_MANUAL: 0, SOURCE_NONE: 0}
+    for meta in (record.get("field_meta") or {}).values():
+        if isinstance(meta, dict):
+            src = str(meta.get("source") or SOURCE_NONE)
+            counts[src] = counts.get(src, 0) + 1
+    return counts
+
+
 # ---------------------------------------------------------------------------
 # RFC 5545 (.ics) generation -- stdlib only, no dependency
 # ---------------------------------------------------------------------------
@@ -1114,6 +1163,20 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         name_override=getattr(args, "name", None),
         local_source=local_source,
     )
+    if getattr(args, "why", False):
+        try:
+            rec = load_record(vault / deal)
+            c = provenance_summary(rec)
+            nr = len(review_flags(rec))
+            _why(
+                args,
+                "ingest.provenance",
+                f"fields deterministic={c[SOURCE_DETERMINISTIC]} llm={c[SOURCE_LLM]} unidentified={c[SOURCE_NONE]}",
+                f"llm_used={rec.get('provenance', {}).get('llm_used')}",
+                f"needs_review={nr} (see `contract-vault review`; improve with `ingest --llm`)",
+            )
+        except VaultError:
+            pass
     if getattr(args, "json", False):
         _emit_json({"deal": deal, "created": created, "vault": str(vault)})
     elif created:
@@ -1185,7 +1248,10 @@ def cmd_get(args: argparse.Namespace) -> int:
         for ob in obs:
             _out(f"    - [{ob.get('type')}] due {ob.get('due') or '-'}  {ob.get('description')}  ({ob.get('source')}, conf {ob.get('confidence')})")
     prov = rec.get("provenance", {})
-    _out(_dim(f"  provenance:      from_extract={prov.get('from_extract')} extractor={prov.get('extractor_version')} ingested {prov.get('ingested_at')}"))
+    _out(_dim(f"  provenance:      from_extract={prov.get('from_extract')} extractor={prov.get('extractor_version')} llm_used={prov.get('llm_used')} ingested {prov.get('ingested_at')}"))
+    flags = review_flags(rec)
+    if flags:
+        _out(_yellow(f"  needs review:    {len(flags)} field(s): " + ", ".join(str(f["field"]) for f in flags)))
     return EXIT_OK
 
 
@@ -1225,6 +1291,9 @@ def cmd_find(args: argparse.Namespace) -> int:
         if args.text:
             if args.text.lower() not in record_searchable_text(rec):
                 continue
+        if getattr(args, "needs_review", False):
+            if not review_flags(rec):
+                continue
         results.append((rid, d, rec))
     _why(
         args,
@@ -1240,6 +1309,7 @@ def cmd_find(args: argparse.Namespace) -> int:
                 ("expiring_before", getattr(args, "expiring_before", None)),
                 ("value_gt", getattr(args, "value_gt", None)),
                 ("auto_renew", getattr(args, "auto_renew", False)),
+                ("needs_review", getattr(args, "needs_review", False)),
                 ("text", args.text),
             )
             if v
@@ -1331,6 +1401,8 @@ def cmd_stats(args: argparse.Namespace) -> int:
     totals: Dict[str, float] = {}
     expiring_soon = 0
     auto_renew = 0
+    llm_used = 0
+    needs_review = 0
     for _rid, _d, rec in records:
         cp = primary_counterparty(rec)
         by_counterparty[cp] = by_counterparty.get(cp, 0) + 1
@@ -1346,12 +1418,18 @@ def cmd_stats(args: argparse.Namespace) -> int:
             expiring_soon += 1
         if rec.get("term", {}).get("auto_renew") is True:
             auto_renew += 1
+        if rec.get("provenance", {}).get("llm_used") is True:
+            llm_used += 1
+        if review_flags(rec):
+            needs_review += 1
     payload = {
         "vault": str(vault),
         "count": len(records),
         "total_value": {k: round(v, 2) for k, v in sorted(totals.items())},
         "expiring_within_90d": expiring_soon,
         "auto_renew_count": auto_renew,
+        "llm_used_count": llm_used,
+        "needs_review_count": needs_review,
         "by_counterparty": dict(sorted(by_counterparty.items(), key=lambda kv: (-kv[1], kv[0]))),
         "by_governing_law": dict(sorted(by_law.items(), key=lambda kv: (-kv[1], kv[0]))),
     }
@@ -1362,6 +1440,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
     if totals:
         _out("  total value: " + ", ".join(f"{round(v, 2)} {k}" for k, v in sorted(totals.items())))
     _out(f"  expiring within 90d: {expiring_soon}    auto-renewing: {auto_renew}")
+    _out(f"  llm-assisted (extract): {llm_used}    needs review: {needs_review}  (`contract-vault review`)")
     if by_counterparty:
         _out("  by counterparty:")
         for cp, n in sorted(by_counterparty.items(), key=lambda kv: (-kv[1], kv[0])):
@@ -1406,6 +1485,39 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return EXIT_OK if ok else EXIT_FAIL
 
 
+def cmd_review(args: argparse.Namespace) -> int:
+    """Deterministic 'verify, not trust' worklist: deals with unidentified, LLM-derived,
+    or low-confidence fields. Never calls an LLM; re-ingest with --llm to improve them."""
+    vault = resolve_vault(args)
+    threshold = getattr(args, "threshold", None)
+    threshold = REVIEW_THRESHOLD if threshold is None else float(threshold)
+    records = load_all_records(vault)
+    flagged = [(rid, rec, review_flags(rec, threshold)) for rid, _d, rec in records]
+    flagged = [t for t in flagged if t[2]]
+    _why(args, "review", f"scanned={len(records)}", f"needs_review={len(flagged)}", f"threshold={threshold}")
+    if getattr(args, "json", False):
+        _emit_json(
+            {
+                "threshold": threshold,
+                "count": len(flagged),
+                "deals": [
+                    {"id": rid, "counterparty": primary_counterparty(rec), "flags": fl}
+                    for rid, rec, fl in flagged
+                ],
+            }
+        )
+        return EXIT_OK
+    if not flagged:
+        _out(_green(f"Nothing needs review (confidence threshold {threshold})."))
+        return EXIT_OK
+    for rid, _rec, fl in flagged:
+        _out(_bold(rid) + _dim(f"  ({len(fl)} field(s))"))
+        for f in fl:
+            _out(f"   - {f['field']}: {_yellow(', '.join(f['reasons']))}  [{f['source']}, conf {f['confidence']}]")
+    _out(_dim(f"{len(flagged)} deal(s) need review. Improve with `contract-vault ingest <file> --llm` (delegates to extract)."))
+    return EXIT_OK
+
+
 def cmd_demo(args: argparse.Namespace) -> int:
     import tempfile
 
@@ -1448,11 +1560,11 @@ def cmd_demo(args: argparse.Namespace) -> int:
 
 SUBCOMMANDS = [
     "init", "ingest", "list", "get", "show", "find", "search",
-    "due", "obligations", "stats", "verify", "demo",
+    "due", "obligations", "stats", "verify", "review", "demo",
 ]
 FIND_FLAGS = [
     "--counterparty", "--governing-law", "--currency", "--expiring-before",
-    "--value-gt", "--auto-renew", "--text", "--json",
+    "--value-gt", "--auto-renew", "--needs-review", "--text", "--json",
 ]
 
 
@@ -1617,6 +1729,7 @@ def build_parser() -> argparse.ArgumentParser:
         p_find.add_argument("--expiring-before", dest="expiring_before", metavar="DATE", help="expiration date before DATE")
         p_find.add_argument("--value-gt", dest="value_gt", type=float, metavar="N", help="value amount greater than N (compare within a currency by adding --currency)")
         p_find.add_argument("--auto-renew", dest="auto_renew", action="store_true", help="only auto-renewing deals")
+        p_find.add_argument("--needs-review", dest="needs_review", action="store_true", help="only deals with unidentified/llm-derived/low-confidence fields")
         p_find.set_defaults(func=cmd_find)
 
     for alias in ("due", "obligations"):
@@ -1635,6 +1748,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify = sub.add_parser("verify", help="integrity check (source sha256 + git state)")
     _add_common(p_verify)
     p_verify.set_defaults(func=cmd_verify)
+
+    p_review = sub.add_parser("review", help="list fields needing review (unidentified / llm-derived / low-confidence)")
+    _add_common(p_review)
+    p_review.add_argument("--threshold", type=float, metavar="C", help=f"confidence threshold (default {REVIEW_THRESHOLD})")
+    p_review.set_defaults(func=cmd_review)
 
     p_demo = sub.add_parser("demo", help="run the full ingest->find->due flow on bundled fixtures")
     _add_common(p_demo)
