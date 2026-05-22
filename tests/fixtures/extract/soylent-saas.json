@@ -1,0 +1,28 @@
+{
+  "document": {
+    "title": null,
+    "format": "markdown",
+    "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "source_path": "/contracts/soylent-saas.md"
+  },
+  "parties": [
+    { "name": "Soylent Systems", "role": "Vendor", "confidence": 0.9, "source": "deterministic" }
+  ],
+  "dates": {
+    "effective": { "value": "2025-11-01", "confidence": 0.9, "source": "deterministic" },
+    "expiration": { "value": "2026-10-31", "confidence": 0.9, "source": "deterministic" }
+  },
+  "term": {
+    "length": { "value": "12 months", "confidence": 0.9, "source": "deterministic" },
+    "auto_renew": { "value": true, "confidence": 0.82, "source": "deterministic" },
+    "notice_period_days": { "value": 30, "confidence": 0.85, "source": "deterministic" }
+  },
+  "governing_law": { "value": "New York", "confidence": 0.88, "source": "deterministic" },
+  "clauses": [],
+  "defined_terms": [],
+  "value": { "value": 50000, "confidence": 0.8, "source": "deterministic" },
+  "obligations": [
+    { "text": "Vendor shall maintain 99.9% uptime for the duration of the term.", "confidence": 0.6, "source": "llm" }
+  ],
+  "_meta": { "extractor_version": "extract-cli 1.4.0", "tiers_used": ["deterministic", "llm"], "llm_used": true }
+}

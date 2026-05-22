@@ -1,0 +1,34 @@
+{
+  "schema_version": "1.0",
+  "id": "stark-industries/letter-of-intent",
+  "title": "Letter of Intent",
+  "status": "signed",
+  "signed_on": null,
+  "parties": [
+    { "name": "Stark Industries", "role": null, "source": "manual", "confidence": 1.0 }
+  ],
+  "effective_date": null,
+  "expiration_date": null,
+  "term": {
+    "length": null,
+    "auto_renew": null,
+    "notice_period_days": null,
+    "renewal_window": null
+  },
+  "governing_law": null,
+  "value": { "raw": null, "amount": null, "currency": null },
+  "source": {
+    "path": "(not vaulted)",
+    "sha256": "",
+    "format": "unknown",
+    "vaulted": false
+  },
+  "obligations": [],
+  "provenance": {
+    "from_extract": false,
+    "extractor_version": "manual",
+    "llm_used": false,
+    "ingested_at": "2025-01-01T00:00:00Z"
+  },
+  "field_meta": {}
+}

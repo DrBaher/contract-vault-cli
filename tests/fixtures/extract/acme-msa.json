@@ -1,0 +1,29 @@
+{
+  "document": {
+    "title": "Master Services Agreement",
+    "format": "pdf",
+    "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "source_path": "/contracts/acme-msa.pdf"
+  },
+  "parties": [
+    { "name": "Acme Corporation", "role": "Customer", "confidence": 0.98, "source": "deterministic" },
+    { "name": "Globex LLC", "role": "Provider", "confidence": 0.97, "source": "deterministic" }
+  ],
+  "dates": {
+    "effective": { "value": "2025-03-01", "confidence": 0.95, "source": "deterministic" },
+    "expiration": { "value": "2026-02-28", "confidence": 0.95, "source": "deterministic" }
+  },
+  "term": {
+    "length": { "value": "1 year", "confidence": 0.9, "source": "deterministic" },
+    "auto_renew": { "value": true, "confidence": 0.88, "source": "deterministic" },
+    "notice_period_days": { "value": 60, "confidence": 0.9, "source": "deterministic" }
+  },
+  "governing_law": { "value": "Delaware", "confidence": 0.93, "source": "deterministic" },
+  "clauses": [],
+  "defined_terms": [],
+  "value": { "value": "$120,000", "confidence": 0.85, "source": "deterministic" },
+  "obligations": [
+    { "text": "Customer shall pay the annual fee by 2025-04-15.", "confidence": 0.8, "source": "deterministic" }
+  ],
+  "_meta": { "extractor_version": "extract-cli 1.4.0", "tiers_used": ["deterministic"], "llm_used": false }
+}

@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0",
+  "id": "globodyne/supply-agreement",
+  "title": "Supply Agreement",
+  "status": "signed",
+  "signed_on": "2024-09-01",
+  "parties": [
+    { "name": "Globodyne", "role": "Buyer", "source": "deterministic", "confidence": 0.97 }
+  ],
+  "effective_date": "2024-09-01",
+  "expiration_date": "2026-08-31",
+  "term": {
+    "length": "2 years",
+    "auto_renew": true,
+    "notice_period_days": 45,
+    "renewal_window": { "deadline": "2026-07-17", "expiration": "2026-08-31" }
+  },
+  "governing_law": "Texas",
+  "value": { "raw": "$3,000,000", "amount": 3000000.0, "currency": "USD" },
+  "source": {
+    "path": "(not vaulted)",
+    "sha256": "55555555555555555555555555555555555555555555555555555555555555ab",
+    "format": "pdf",
+    "vaulted": false
+  },
+  "obligations": [
+    { "type": "expiration", "due": "2026-08-31", "description": "Contract expires.", "source": "deterministic", "confidence": 0.95 },
+    { "type": "renewal_notice", "due": "2026-07-17", "description": "Notice deadline: 45 days before expiration (2026-08-31); contract auto-renews.", "source": "deterministic", "confidence": 0.9 }
+  ],
+  "provenance": {
+    "from_extract": true,
+    "extractor_version": "extract-cli 1.3.0",
+    "llm_used": false,
+    "ingested_at": "2024-09-02T10:00:00Z"
+  },
+  "field_meta": {
+    "effective_date": { "confidence": 0.95, "source": "deterministic" },
+    "expiration_date": { "confidence": 0.95, "source": "deterministic" },
+    "term.length": { "confidence": 0.9, "source": "deterministic" },
+    "term.auto_renew": { "confidence": 0.9, "source": "deterministic" },
+    "term.notice_period_days": { "confidence": 0.9, "source": "deterministic" },
+    "governing_law": { "confidence": 0.93, "source": "manual" },
+    "value": { "confidence": 0.85, "source": "deterministic" }
+  }
+}

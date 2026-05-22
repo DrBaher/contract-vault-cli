@@ -1,0 +1,26 @@
+{
+  "document": {
+    "title": "Mutual Non-Disclosure Agreement",
+    "format": "docx",
+    "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+    "source_path": "/contracts/initech-nda.docx"
+  },
+  "parties": [
+    { "name": "Initech Inc", "role": "Disclosing Party", "confidence": 0.95, "source": "deterministic" },
+    { "name": "Hooli Ltd", "role": "Receiving Party", "confidence": 0.91, "source": "llm" }
+  ],
+  "dates": {
+    "effective": { "value": "2025-06-15", "confidence": 0.9, "source": "deterministic" },
+    "expiration": { "value": "2027-06-14", "confidence": 0.9, "source": "deterministic" }
+  },
+  "term": {
+    "length": { "value": "2 years", "confidence": 0.85, "source": "deterministic" },
+    "auto_renew": { "value": false, "confidence": 0.8, "source": "deterministic" },
+    "notice_period_days": { "value": null, "confidence": 0.0, "source": "none" }
+  },
+  "governing_law": { "value": "California", "confidence": 0.9, "source": "deterministic" },
+  "clauses": [],
+  "defined_terms": [],
+  "value": { "value": null, "confidence": 0.0, "source": "none" },
+  "_meta": { "extractor_version": "extract-cli 1.4.0", "tiers_used": ["deterministic", "llm"], "llm_used": true }
+}

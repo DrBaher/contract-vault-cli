@@ -1,0 +1,30 @@
+{
+  "document": {
+    "title": "Commercial Lease Agreement",
+    "format": "pdf",
+    "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "source_path": "/contracts/umbrella-lease.pdf"
+  },
+  "parties": [
+    { "name": "Umbrella Corp", "role": "Tenant", "confidence": 0.94, "source": "deterministic" },
+    { "name": "Tyrell Holdings", "role": "Landlord", "confidence": 0.92, "source": "deterministic" }
+  ],
+  "dates": {
+    "effective": { "value": "January 15, 2025", "confidence": 0.87, "source": "deterministic" },
+    "expiration": { "value": "January 14, 2030", "confidence": 0.87, "source": "deterministic" }
+  },
+  "term": {
+    "length": { "value": "5 years", "confidence": 0.9, "source": "deterministic" },
+    "auto_renew": { "value": true, "confidence": 0.7, "source": "llm" },
+    "notice_period_days": { "value": "90 days", "confidence": 0.75, "source": "deterministic" },
+    "renewal_mechanics": { "value": "Renews for successive 1-year terms unless either party gives written notice.", "confidence": 0.7, "source": "llm" }
+  },
+  "governing_law": { "value": "England and Wales", "confidence": 0.91, "source": "deterministic" },
+  "clauses": [],
+  "defined_terms": [],
+  "value": { "value": "£2,400,000", "confidence": 0.8, "source": "deterministic" },
+  "obligations": [
+    { "text": "Tenant shall provide proof of insurance on or before 1 March 2025.", "confidence": 0.7, "source": "deterministic" }
+  ],
+  "_meta": { "extractor_version": "extract-cli 1.4.0", "tiers_used": ["deterministic", "llm"], "llm_used": true }
+}
