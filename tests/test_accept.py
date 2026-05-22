@@ -122,3 +122,51 @@ def test_review_strict_exit_code(loaded_vault: Path) -> None:
 def test_review_strict_clean_vault(empty_vault: Path) -> None:
     cv.main(["ingest", str(EXTRACT_FIXTURES / "acme-msa.json"), "--vault", str(empty_vault)])  # all deterministic
     assert cv.main(["review", "--strict", "--vault", str(empty_vault)]) == cv.EXIT_OK
+
+
+def test_accept_requires_args(empty_vault: Path) -> None:
+    assert cv.main(["accept", "--vault", str(empty_vault)]) == cv.EXIT_USAGE  # neither <deal field> nor --from
+
+
+def test_accept_obligation_index(empty_vault: Path) -> None:
+    cv.main(["ingest", str(EXTRACT_FIXTURES / "soylent-saas.json"), "--vault", str(empty_vault)])
+    deal = "soylent-systems/soylent-saas"
+    rec = _read(empty_vault, deal)
+    ob_idx = next(i for i, o in enumerate(rec["obligations"]) if o["type"] == "obligation")
+    cv.main(["accept", deal, f"obligations[{ob_idx}]", "--vault", str(empty_vault)])
+    rec = _read(empty_vault, deal)
+    assert rec["obligations"][ob_idx]["source"] == "manual"
+    assert cv.review_flags(rec) == []  # the lone llm obligation was the only flag
+
+
+def test_bulk_accept_from_list(empty_vault: Path, tmp_path: Path) -> None:
+    cv.main(["ingest", str(EXTRACT_FIXTURES / "initech-nda.json"), "--vault", str(empty_vault)])
+    todo = tmp_path / "todo.json"
+    todo.write_text(json.dumps([
+        {"deal": INITECH, "field": "value", "value": "$1,000,000"},
+        {"deal": INITECH, "field": "term.notice_period_days", "value": "30"},
+        {"deal": INITECH, "field": "parties[1]"},
+    ]))
+    before = int(cv._git(empty_vault, "rev-list", "--count", "HEAD").stdout.strip())
+    assert cv.main(["accept", "--from", str(todo), "--vault", str(empty_vault)]) == 0
+    after = int(cv._git(empty_vault, "rev-list", "--count", "HEAD").stdout.strip())
+    assert after == before + 1   # one commit for the whole batch
+    rec = _read(empty_vault, INITECH)
+    assert rec["value"]["amount"] == 1000000.0
+    assert rec["term"]["notice_period_days"] == 30
+    assert rec["parties"][1]["source"] == "manual"
+    assert cv.review_flags(rec) == []   # all flags cleared
+
+
+def test_bulk_accept_from_review_output(empty_vault: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    # review --json output is directly consumable: accept every flag as-is
+    cv.main(["ingest", str(EXTRACT_FIXTURES / "initech-nda.json"), "--vault", str(empty_vault)])
+    cv.main(["ingest", str(EXTRACT_FIXTURES / "umbrella-lease.json"), "--vault", str(empty_vault)])
+    capsys.readouterr()  # drop ingest output
+    cv.main(["review", "--json", "--vault", str(empty_vault)])
+    review_out = capsys.readouterr().out
+    todo = tmp_path / "review.json"
+    todo.write_text(review_out)
+    assert cv.main(["accept", "--from", str(todo), "--vault", str(empty_vault)]) == 0
+    # everything that was flagged is now manual -> review is clean
+    assert cv.main(["review", "--strict", "--vault", str(empty_vault)]) == cv.EXIT_OK

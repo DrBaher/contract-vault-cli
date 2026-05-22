@@ -113,7 +113,9 @@ is idempotent.
 | `export` | Export the register as `csv` / `md` / `json` (`--expiring-before`, `--needs-review`). For spreadsheets & reports. |
 | `verify` | Integrity check: source `sha256` matches + git tree clean. |
 | `review` | Deterministic worklist of fields that are unidentified / LLM-derived / low-confidence (`--threshold`; `--strict` exits 1 for CI). Never calls an LLM. |
-| `accept <deal> <field>` | Mark a reviewed field as human-verified (`source=manual`), optionally `--value` to correct it; recomputes the calendar for date/term changes. |
+| `accept <deal> <field>` | Mark a reviewed field as human-verified (`source=manual`), optionally `--value` to correct it; recomputes the calendar for date/term changes. Bulk via `accept --from FILE`. |
+| `risk` / `at-risk` | Renewal exposure: **missed** notice deadlines (CRITICAL if auto-renewing), imminent notices, and expirations (`--within`, `--strict`). |
+| `history <deal>` | The deal's git history (ingest + each accept). |
 | `demo` | Run the full flow on bundled fixtures (no extract-cli, no LLM). |
 
 ### Global I/O conventions (shared across the suite)

@@ -34,7 +34,7 @@ def test_review_never_calls_llm_pure_function() -> None:
     # review_flags must be a pure read of stored provenance — no extract/network/LLM.
     rec = {"field_meta": {"value": {"source": "none", "confidence": 0.0}}, "parties": [], "obligations": []}
     assert cv.review_flags(rec) == [
-        {"field": "value", "source": "none", "confidence": 0.0, "reasons": ["unidentified"]}
+        {"field": "value", "label": "value", "source": "none", "confidence": 0.0, "reasons": ["unidentified"]}
     ]
 
 

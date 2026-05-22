@@ -6,6 +6,25 @@ All notable changes to **contract-vault** are documented here. The format follow
 semver-meaningful: backward-incompatible record/output changes require a major bump;
 new optional fields are minor additions.
 
+## [0.1.7] - 2026-05-22
+
+### Added
+- **Bulk `accept --from FILE`** — apply many accepts at once from a JSON list of
+  `{deal, field, value?}` *or* directly from `review --json` output (accepts every listed
+  flag as-is). Edits to the same deal are batched into one record write + commit. `accept`
+  now also handles `obligations[i]`, and review flag field names are canonical
+  (accept-compatible) with a separate display label.
+- **`risk` / `at-risk`** — renewal-exposure analysis surfacing notice deadlines that are
+  **already missed** while the contract is still active (CRITICAL when it auto-renews),
+  imminent notice deadlines, and expirations within `--within` (default 30d). Unlike
+  `due`, it shows *past* deadlines. `--strict` exits 1 on any CRITICAL.
+- **`history <deal>`** — the deal's git history (ingest + each `accept`), since every
+  change is a commit.
+
+### Fixed
+- Synced `pyproject.toml` version with `__version__` (0.1.6 had drifted); added a test
+  asserting they match.
+
 ## [0.1.6] - 2026-05-22
 
 ### Added
@@ -133,6 +152,7 @@ Initial release: the post-signature management layer of the contract-ops CLI sui
   tests dependency-free; fixtures vendor sample extract JSON so the suite runs offline and
   without extract-cli installed. Property tests use stdlib `random.Random(seed)`.
 
+[0.1.7]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.7
 [0.1.6]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.6
 [0.1.5]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.5
 [0.1.4]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.4

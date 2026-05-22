@@ -37,7 +37,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
-__version__ = "0.1.6"
+__version__ = "0.1.7"
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -853,7 +853,7 @@ def review_flags(record: JSONObj, threshold: float = REVIEW_THRESHOLD) -> List[J
     """
     out: List[JSONObj] = []
 
-    def consider(field: str, source: Any, confidence: Any) -> None:
+    def consider(field: str, label: str, source: Any, confidence: Any) -> None:
         src = str(source or SOURCE_NONE)
         conf = float(confidence) if isinstance(confidence, (int, float)) and not isinstance(confidence, bool) else 0.0
         reasons: List[str] = []
@@ -864,18 +864,18 @@ def review_flags(record: JSONObj, threshold: float = REVIEW_THRESHOLD) -> List[J
         if src != SOURCE_NONE and conf < threshold:
             reasons.append(f"low-confidence({round(conf, 2)})")
         if reasons:
-            out.append({"field": field, "source": src, "confidence": round(conf, 4), "reasons": reasons})
+            # 'field' is a canonical, accept-compatible path; 'label' is for display only.
+            out.append({"field": field, "label": label, "source": src, "confidence": round(conf, 4), "reasons": reasons})
 
     for name, meta in (record.get("field_meta") or {}).items():
         if isinstance(meta, dict):
-            consider(name, meta.get("source"), meta.get("confidence"))
+            consider(name, name, meta.get("source"), meta.get("confidence"))
     for i, party in enumerate(record.get("parties", [])):
         if isinstance(party, dict):
-            consider(f"parties[{i}]:{party.get('name', '?')}", party.get("source"), party.get("confidence"))
-    for ob in record.get("obligations", []):
+            consider(f"parties[{i}]", str(party.get("name", "?")), party.get("source"), party.get("confidence"))
+    for i, ob in enumerate(record.get("obligations", [])):
         if isinstance(ob, dict) and ob.get("type") == "obligation":
-            desc = str(ob.get("description", ""))[:40]
-            consider(f"obligation:{desc}", ob.get("source"), ob.get("confidence"))
+            consider(f"obligations[{i}]", str(ob.get("description", ""))[:40], ob.get("source"), ob.get("confidence"))
     return out
 
 
@@ -1685,7 +1685,8 @@ def cmd_review(args: argparse.Namespace) -> int:
     for rid, _rec, fl in flagged:
         _out(_bold(rid) + _dim(f"  ({len(fl)} field(s))"))
         for f in fl:
-            _out(f"   - {f['field']}: {_yellow(', '.join(f['reasons']))}  [{f['source']}, conf {f['confidence']}]")
+            label = f" ({f['label']})" if f.get("label") and f["label"] != f["field"] else ""
+            _out(f"   - {f['field']}{label}: {_yellow(', '.join(f['reasons']))}  [{f['source']}, conf {f['confidence']}]")
     _out(_dim(f"{len(flagged)} deal(s) need review. Accept a field with `contract-vault accept <deal> <field> [--value V]`, or improve via `ingest --llm`."))
     return rc
 
@@ -1726,46 +1727,217 @@ def _apply_value(record: JSONObj, field: str, raw: str) -> None:
         raise UsageError(f"--value not supported for field {field!r}")
 
 
-def cmd_accept(args: argparse.Namespace) -> int:
-    """Mark a reviewed field as human-verified (source=manual, confidence=1.0), optionally
-    overriding its value. Recomputes the deadline calendar if a date/term field changes.
-    Deterministic and local -- never calls an LLM."""
-    vault = resolve_vault(args)
-    rid, deal_dir, rec = find_deal(vault, args.deal)
-    field = args.field
-    value = getattr(args, "value", None)
+def _accept_field(record: JSONObj, field: str, value: Optional[str]) -> bool:
+    """Apply one accept to a record in place; return True if a schedule field changed.
 
+    Marks the target source=manual, confidence=1.0, optionally overriding its value.
+    Supports the scalar field_meta keys, parties[i], and obligations[i].
+    """
     party_match = re.fullmatch(r"parties\[(\d+)\]", field)
     if party_match:
         idx = int(party_match.group(1))
-        parties = rec.get("parties", [])
+        parties = record.get("parties", [])
         if idx >= len(parties) or not isinstance(parties[idx], dict):
-            raise UsageError(f"{rid} has no parties[{idx}]")
+            raise UsageError(f"no parties[{idx}] on this record")
         if value is not None:
             parties[idx]["name"] = value
         parties[idx]["source"] = SOURCE_MANUAL
         parties[idx]["confidence"] = 1.0
-    elif field in ACCEPTABLE_FIELDS:
+        return False
+    ob_match = re.fullmatch(r"obligations\[(\d+)\]", field)
+    if ob_match:
+        idx = int(ob_match.group(1))
+        obs = record.get("obligations", [])
+        if idx >= len(obs) or not isinstance(obs[idx], dict):
+            raise UsageError(f"no obligations[{idx}] on this record")
         if value is not None:
-            _apply_value(rec, field, value)
-        rec.setdefault("field_meta", {})[field] = {"source": SOURCE_MANUAL, "confidence": 1.0}
-        if field in SCHEDULE_FIELDS:
-            recompute_schedule(rec)
-    else:
-        raise UsageError(
-            f"unknown field {field!r}; acceptable: " + ", ".join(sorted(ACCEPTABLE_FIELDS)) + ", parties[i]"
-        )
+            obs[idx]["description"] = value
+        obs[idx]["source"] = SOURCE_MANUAL
+        obs[idx]["confidence"] = 1.0
+        return False
+    if field in ACCEPTABLE_FIELDS:
+        if value is not None:
+            _apply_value(record, field, value)
+        record.setdefault("field_meta", {})[field] = {"source": SOURCE_MANUAL, "confidence": 1.0}
+        return field in SCHEDULE_FIELDS
+    raise UsageError(
+        f"unknown field {field!r}; acceptable: "
+        + ", ".join(sorted(ACCEPTABLE_FIELDS))
+        + ", parties[i], obligations[i]"
+    )
 
-    rec.setdefault("provenance", {})["last_reviewed_at"] = _now_iso()
-    (deal_dir / RECORD_FILENAME).write_text(_dump_json(rec), encoding="utf-8")
-    git_commit(vault, f"review: accept {rid} {field}" + (f" = {value}" if value is not None else ""), paths=[deal_dir])
-    _why(args, "accept", f"deal={rid}", f"field={field}", f"value={value}", f"schedule_recomputed={field in SCHEDULE_FIELDS and party_match is None}")
-    remaining = len(review_flags(rec))
-    if getattr(args, "json", False):
-        _emit_json({"deal": rid, "field": field, "value": value, "marked": "manual", "remaining_flags": remaining})
+
+def _load_accept_file(path: Path) -> List[Tuple[str, str, Optional[str]]]:
+    """Parse a bulk-accept file: a list of {deal, field, value?} or `review --json` output."""
+    data = load_json_file(path)
+    out: List[Tuple[str, str, Optional[str]]] = []
+    if isinstance(data, list):
+        for item in data:
+            if not isinstance(item, dict) or "deal" not in item or "field" not in item:
+                raise UsageError("each --from entry needs 'deal' and 'field'")
+            val = item.get("value")
+            out.append((str(item["deal"]), str(item["field"]), None if val is None else str(val)))
+    elif isinstance(data, dict) and isinstance(data.get("deals"), list):
+        for deal in data["deals"]:  # review --json output: accept every listed flag as-is
+            for fl in deal.get("flags", []):
+                out.append((str(deal["id"]), str(fl["field"]), None))
     else:
-        what = f" = {value}" if value is not None else " (accepted as-is)"
-        _out(_green(f"Marked {rid} :: {field} as manual{what}") + _dim(f"  ({remaining} field(s) still need review)"))
+        raise UsageError("--from file must be a list of {deal,field,value?} or `review --json` output")
+    return out
+
+
+def cmd_accept(args: argparse.Namespace) -> int:
+    """Mark reviewed field(s) as human-verified (source=manual, confidence=1.0), optionally
+    overriding values. Recomputes the deadline calendar when a date/term field changes.
+    Single (`accept <deal> <field>`) or bulk (`accept --from FILE`). Never calls an LLM."""
+    vault = resolve_vault(args)
+    from_file = getattr(args, "from_file", None)
+    if from_file:
+        instructions = _load_accept_file(Path(from_file).expanduser())
+    else:
+        if not getattr(args, "deal", None) or not getattr(args, "field", None):
+            raise UsageError("provide <deal> <field>, or --from FILE for bulk accept")
+        instructions = [(args.deal, args.field, getattr(args, "value", None))]
+    if not instructions:
+        _out(_yellow("nothing to accept"))
+        return EXIT_OK
+
+    # Resolve each distinct deal once so multiple edits to one record accumulate.
+    resolved: Dict[Path, Tuple[str, JSONObj]] = {}
+    plan: List[Tuple[Path, str, Optional[str]]] = []
+    for deal, field, value in instructions:
+        rid, deal_dir, rec = find_deal(vault, deal)
+        if deal_dir not in resolved:
+            resolved[deal_dir] = (rid, rec)
+        plan.append((deal_dir, field, value))
+
+    schedule_dirty: Dict[Path, bool] = {}
+    for deal_dir, field, value in plan:
+        _rid, rec = resolved[deal_dir]
+        changed = _accept_field(rec, field, value)
+        schedule_dirty[deal_dir] = schedule_dirty.get(deal_dir, False) or changed
+
+    paths: List[Path] = []
+    for deal_dir, (_rid, rec) in resolved.items():
+        if schedule_dirty.get(deal_dir):
+            recompute_schedule(rec)
+        rec.setdefault("provenance", {})["last_reviewed_at"] = _now_iso()
+        (deal_dir / RECORD_FILENAME).write_text(_dump_json(rec), encoding="utf-8")
+        paths.append(deal_dir)
+
+    if from_file:
+        msg = f"review: bulk accept {len(plan)} field(s) across {len(resolved)} deal(s)"
+    else:
+        d0, f0, v0 = plan[0]
+        msg = f"review: accept {resolved[d0][0]} {f0}" + (f" = {v0}" if v0 is not None else "")
+    git_commit(vault, msg, paths=paths)
+    _why(args, "accept", f"instructions={len(plan)}", f"deals={len(resolved)}", f"from={from_file or '(single)'}")
+
+    remaining = sum(len(review_flags(rec)) for _rid, rec in resolved.values())
+    if getattr(args, "json", False):
+        _emit_json(
+            {
+                "accepted": len(plan),
+                "deals": [resolved[dd][0] for dd in resolved],
+                "marked": "manual",
+                "remaining_flags": remaining,
+            }
+        )
+    elif from_file:
+        _out(_green(f"Accepted {len(plan)} field(s) across {len(resolved)} deal(s)") + _dim(f"  ({remaining} still need review)"))
+    else:
+        d0, f0, v0 = plan[0]
+        what = f" = {v0}" if v0 is not None else " (accepted as-is)"
+        _out(_green(f"Marked {resolved[d0][0]} :: {f0} as manual{what}") + _dim(f"  ({remaining} field(s) still need review)"))
+    return EXIT_OK
+
+
+def risk_items(records: List[Tuple[str, Path, JSONObj]], as_of: dt.date, within_days: int) -> List[JSONObj]:
+    """Renewal-exposure analysis: notice deadlines that are MISSED (passed while the contract
+    is still active) or imminent, plus expirations within the window. Unlike `due`, this
+    surfaces deadlines that are already in the past -- the highest-stakes case."""
+    horizon = as_of + dt.timedelta(days=within_days)
+    items: List[JSONObj] = []
+    for rid, _d, rec in records:
+        cp = primary_counterparty(rec)
+        term = rec.get("term", {}) or {}
+        exp = parse_date(rec.get("expiration_date"))
+        auto = term.get("auto_renew")
+        deadline = parse_date((term.get("renewal_window") or {}).get("deadline"))
+        active = exp is None or exp >= as_of
+        if not active:
+            continue
+        # One item per deal: the single most pressing concern, highest priority first.
+        item: Optional[JSONObj] = None
+        if deadline is not None and deadline < as_of:
+            sev = "critical" if auto is True else "warning"
+            note = "auto-renewal notice window MISSED" if auto is True else "notice deadline passed"
+            item = {"severity": sev, "kind": "renewal_notice", "due": deadline.isoformat(),
+                    "days_until": (deadline - as_of).days, "note": note}
+        elif deadline is not None and deadline <= horizon:
+            item = {"severity": "soon", "kind": "renewal_notice", "due": deadline.isoformat(),
+                    "days_until": (deadline - as_of).days, "note": "notice deadline approaching"}
+        elif exp is not None and as_of <= exp <= horizon:
+            item = {"severity": "soon", "kind": "expiration", "due": exp.isoformat(),
+                    "days_until": (exp - as_of).days, "note": "contract expiring"}
+        if item is not None:
+            item.update({"deal": rid, "counterparty": cp,
+                         "expiration": exp.isoformat() if exp else None, "auto_renew": auto})
+            items.append(item)
+    rank = {"critical": 0, "warning": 1, "soon": 2}
+    items.sort(key=lambda it: (rank.get(str(it["severity"]), 3), str(it["due"])))
+    return items
+
+
+def cmd_risk(args: argparse.Namespace) -> int:
+    vault = resolve_vault(args)
+    within = parse_within(args.within) if getattr(args, "within", None) else 30
+    as_of = parse_date(args.as_of) if getattr(args, "as_of", None) else dt.date.today()
+    if getattr(args, "as_of", None) and as_of is None:
+        raise UsageError(f"invalid --as-of date: {args.as_of!r}")
+    assert as_of is not None
+    items = risk_items(load_all_records(vault), as_of, within)
+    n_critical = sum(1 for it in items if it["severity"] == "critical")
+    rc = EXIT_FAIL if (n_critical and getattr(args, "strict", False)) else EXIT_OK
+    _why(args, "risk", f"as_of={as_of.isoformat()}", f"within_days={within}", f"items={len(items)}", f"critical={n_critical}")
+    if getattr(args, "json", False):
+        _emit_json({"as_of": as_of.isoformat(), "within_days": within, "count": len(items), "critical": n_critical, "items": items})
+        return rc
+    if not items:
+        _out(_green(f"No at-risk deadlines within {within} days (as of {as_of.isoformat()})."))
+        return EXIT_OK
+    colors = {"critical": "31", "warning": "33", "soon": "36"}
+    for it in items:
+        tag = _c(str(it["severity"]).upper(), colors[str(it["severity"])])
+        days = int(it["days_until"])
+        when = f"{it['due']} ({'+' if days >= 0 else ''}{days}d)"
+        _out(f"  [{tag}] {when}  {it['kind']}  {it['counterparty']}  -- {it['note']}")
+    if n_critical:
+        _out(_red(f"{n_critical} CRITICAL (auto-renewal notice window missed)."))
+    return rc
+
+
+def cmd_history(args: argparse.Namespace) -> int:
+    """Show the git history of a deal (ingest + each accept is a commit)."""
+    vault = resolve_vault(args)
+    rid, deal_dir, _rec = find_deal(vault, args.deal)
+    rel = deal_dir.relative_to(vault).as_posix()
+    proc = _git(vault, "log", "--format=%h%x09%aI%x09%an%x09%s", "--", rel, check=False)
+    entries: List[JSONObj] = []
+    for line in proc.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 4:
+            entries.append({"commit": parts[0], "date": parts[1], "author": parts[2], "message": parts[3]})
+    _why(args, "history", f"deal={rid}", f"commits={len(entries)}")
+    if getattr(args, "json", False):
+        _emit_json({"deal": rid, "count": len(entries), "history": entries})
+        return EXIT_OK
+    if not entries:
+        _out(_dim("(no history)"))
+        return EXIT_OK
+    _out(_bold(rid))
+    for e in entries:
+        _out(f"  {_yellow(str(e['commit']))}  {str(e['date'])[:10]}  {e['message']}")
     return EXIT_OK
 
 
@@ -1811,7 +1983,8 @@ def cmd_demo(args: argparse.Namespace) -> int:
 
 SUBCOMMANDS = [
     "init", "ingest", "list", "get", "show", "find", "search",
-    "due", "obligations", "stats", "verify", "review", "accept", "export", "demo",
+    "due", "obligations", "stats", "verify", "review", "accept", "export",
+    "risk", "history", "demo",
 ]
 FIND_FLAGS = [
     "--counterparty", "--governing-law", "--currency", "--expiring-before",
@@ -1828,7 +2001,7 @@ def cmd_complete(words: Sequence[str]) -> int:
         candidates: List[str] = []
         if len(words) <= 1:
             candidates = SUBCOMMANDS
-        elif sub in ("get", "show", "verify", "accept"):
+        elif sub in ("get", "show", "verify", "accept", "history"):
             try:
                 vault = resolve_vault(argparse.Namespace())
                 candidates = [rid for rid, _d, _r in load_all_records(vault)]
@@ -2013,12 +2186,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_review.add_argument("--strict", action="store_true", help="exit 1 if any field needs review (CI gate)")
     p_review.set_defaults(func=cmd_review)
 
-    p_accept = sub.add_parser("accept", help="mark a reviewed field as manual (verified), optionally overriding its value")
+    p_accept = sub.add_parser("accept", help="mark reviewed field(s) as manual (verified); single or bulk via --from")
     _add_common(p_accept)
-    p_accept.add_argument("deal", help="deal id (path, leaf name, or unique prefix)")
-    p_accept.add_argument("field", help="field to accept, e.g. value, expiration_date, term.auto_renew, parties[1]")
+    p_accept.add_argument("deal", nargs="?", help="deal id (path, leaf name, or unique prefix)")
+    p_accept.add_argument("field", nargs="?", help="field to accept, e.g. value, expiration_date, term.auto_renew, parties[1]")
     p_accept.add_argument("--value", help="override value (otherwise accept the current value as reviewed)")
+    p_accept.add_argument("--from", dest="from_file", metavar="FILE", help="bulk: a list of {deal,field,value?} or `review --json` output")
     p_accept.set_defaults(func=cmd_accept)
+
+    for alias in ("risk", "at-risk"):
+        p_risk = sub.add_parser(alias, help="renewal-exposure: missed / imminent notice deadlines + expirations")
+        _add_common(p_risk)
+        p_risk.add_argument("--within", default="30d", help="lookahead window for imminent items (default 30d)")
+        p_risk.add_argument("--as-of", dest="as_of", metavar="DATE", help="reference 'today' (default: actual today)")
+        p_risk.add_argument("--strict", action="store_true", help="exit 1 if any CRITICAL (missed auto-renewal notice)")
+        p_risk.set_defaults(func=cmd_risk)
+
+    p_history = sub.add_parser("history", help="show a deal's git history (ingest + each accept)")
+    _add_common(p_history)
+    p_history.add_argument("deal", help="deal id (path, leaf name, or unique prefix)")
+    p_history.set_defaults(func=cmd_history)
 
     p_demo = sub.add_parser("demo", help="run the full ingest->find->due flow on bundled fixtures")
     _add_common(p_demo)

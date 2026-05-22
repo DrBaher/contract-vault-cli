@@ -76,6 +76,14 @@ def test_no_color_env_strips_ansi(loaded_vault: Path, capsys: pytest.CaptureFixt
     assert "\033[" not in capsys.readouterr().out
 
 
+def test_version_matches_pyproject() -> None:
+    import re
+    from conftest import REPO_ROOT
+    text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    m = re.search(r'^version = "([^"]+)"', text, re.MULTILINE)
+    assert m is not None and m.group(1) == cv.__version__, "pyproject version must match __version__"
+
+
 def test_global_help(capsys: pytest.CaptureFixture[str]) -> None:
     rc = cv.main(["--help"])
     assert rc == 0
