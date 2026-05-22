@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/DrBaher/contract-vault/blob/main/docs/spec/obligations-output.schema.json",
+  "title": "contract-vault obligations (`due --format json`) output schema (v1)",
+  "description": "Machine-readable projection of upcoming, dated obligations across the whole vault, produced by `contract-vault due --format json` (and `obligations`). Doubles as the reminder manifest: each row carries days_until and a suggested lead_days. The .ics output (`--format ics`) is the same data rendered as RFC 5545.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["generated_at", "as_of", "within_days", "count", "obligations"],
+  "$defs": {
+    "source": {
+      "enum": ["deterministic", "llm", "manual", "none"]
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    }
+  },
+  "properties": {
+    "generated_at": { "type": "string" },
+    "as_of": { "type": "string" },
+    "within_days": { "type": "integer", "minimum": 0 },
+    "count": { "type": "integer", "minimum": 0 },
+    "obligations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "deal",
+          "counterparty",
+          "type",
+          "due",
+          "days_until",
+          "description",
+          "source",
+          "confidence",
+          "lead_days"
+        ],
+        "properties": {
+          "deal": { "type": "string" },
+          "counterparty": { "type": "string" },
+          "type": { "type": "string" },
+          "due": { "type": "string" },
+          "days_until": { "type": "integer" },
+          "description": { "type": "string" },
+          "source": { "$ref": "#/$defs/source" },
+          "confidence": { "$ref": "#/$defs/confidence" },
+          "lead_days": { "type": "integer", "minimum": 0 }
+        }
+      }
+    }
+  }
+}

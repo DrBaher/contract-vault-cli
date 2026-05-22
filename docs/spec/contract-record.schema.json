@@ -1,0 +1,141 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/DrBaher/contract-vault/blob/main/docs/spec/contract-record.schema.json",
+  "title": "contract-vault record schema (v1)",
+  "description": "A single executed-deal entry: <vault>/<counterparty>/<name>/record.json. Built by `contract-vault ingest` from extract-cli output. Every value carries provenance via field_meta and per-item source/confidence; downstream treats data as 'verify, not trust'. source is one of {deterministic, llm, manual, none} where 'manual' marks human edits.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "title",
+    "status",
+    "signed_on",
+    "parties",
+    "effective_date",
+    "expiration_date",
+    "term",
+    "governing_law",
+    "value",
+    "source",
+    "obligations",
+    "provenance",
+    "field_meta"
+  ],
+  "$defs": {
+    "source": {
+      "enum": ["deterministic", "llm", "manual", "none"]
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "nullableString": {
+      "type": ["string", "null"]
+    },
+    "fieldMeta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["confidence", "source"],
+      "properties": {
+        "confidence": { "$ref": "#/$defs/confidence" },
+        "source": { "$ref": "#/$defs/source" }
+      }
+    }
+  },
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "id": { "type": "string" },
+    "title": { "$ref": "#/$defs/nullableString" },
+    "status": { "type": "string" },
+    "signed_on": { "$ref": "#/$defs/nullableString" },
+    "parties": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "role", "source", "confidence"],
+        "properties": {
+          "name": { "type": "string" },
+          "role": { "$ref": "#/$defs/nullableString" },
+          "source": { "$ref": "#/$defs/source" },
+          "confidence": { "$ref": "#/$defs/confidence" }
+        }
+      }
+    },
+    "effective_date": { "$ref": "#/$defs/nullableString" },
+    "expiration_date": { "$ref": "#/$defs/nullableString" },
+    "term": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["length", "auto_renew", "notice_period_days", "renewal_window"],
+      "properties": {
+        "length": { "$ref": "#/$defs/nullableString" },
+        "auto_renew": { "type": ["boolean", "null"] },
+        "notice_period_days": { "type": ["integer", "null"] },
+        "renewal_window": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["deadline", "expiration"],
+          "properties": {
+            "deadline": { "type": "string" },
+            "expiration": { "type": "string" }
+          }
+        }
+      }
+    },
+    "governing_law": { "$ref": "#/$defs/nullableString" },
+    "value": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["raw", "amount", "currency"],
+      "properties": {
+        "raw": {},
+        "amount": { "type": ["number", "null"] },
+        "currency": { "$ref": "#/$defs/nullableString" }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "format", "vaulted"],
+      "properties": {
+        "path": { "type": "string" },
+        "sha256": { "type": "string" },
+        "format": { "type": "string" },
+        "vaulted": { "type": "boolean" }
+      }
+    },
+    "obligations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "due", "description", "source", "confidence"],
+        "properties": {
+          "type": { "type": "string" },
+          "due": { "$ref": "#/$defs/nullableString" },
+          "description": { "type": "string" },
+          "source": { "$ref": "#/$defs/source" },
+          "confidence": { "$ref": "#/$defs/confidence" }
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from_extract", "extractor_version", "llm_used", "ingested_at"],
+      "properties": {
+        "from_extract": { "type": "boolean" },
+        "extractor_version": { "type": "string" },
+        "llm_used": { "type": "boolean" },
+        "ingested_at": { "type": "string" }
+      }
+    },
+    "field_meta": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/fieldMeta" }
+    }
+  }
+}
