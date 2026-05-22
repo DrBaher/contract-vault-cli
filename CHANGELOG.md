@@ -6,6 +6,16 @@ All notable changes to **contract-vault** are documented here. The format follow
 semver-meaningful: backward-incompatible record/output changes require a major bump;
 new optional fields are minor additions.
 
+## [0.1.2] - 2026-05-22
+
+### Fixed
+- **Long titles/counterparties no longer crash `ingest`.** Slugs are now capped to a
+  path-component-safe length (80 chars), so a very long contract title can't exceed the
+  filesystem's 255-byte directory-name limit (previously raised an uncaught
+  `OSError: File name too long`). Surfaced by a 50-agreement stress test.
+- Any `OSError` during a command (filesystem/git I/O) is now reported as a clean
+  `error:` message with exit code 1 instead of a raw traceback.
+
 ## [0.1.1] - 2026-05-22
 
 ### Added
@@ -69,5 +79,6 @@ Initial release: the post-signature management layer of the contract-ops CLI sui
   tests dependency-free; fixtures vendor sample extract JSON so the suite runs offline and
   without extract-cli installed. Property tests use stdlib `random.Random(seed)`.
 
+[0.1.2]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.2
 [0.1.1]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.1
 [0.1.0]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.0

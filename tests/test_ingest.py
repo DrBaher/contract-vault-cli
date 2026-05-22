@@ -130,6 +130,19 @@ def test_ingest_vaults_source_and_records_sha(empty_vault: Path, tmp_path: Path)
     assert (empty_vault / deal / rec["source"]["path"]).read_bytes() == b"the actual signed bytes"
 
 
+def test_ingest_long_title_does_not_crash(empty_vault: Path) -> None:
+    # Regression: a ~1000-char title previously raised OSError(ENAMETOOLONG) on mkdir.
+    payload = extract_fixture("acme-msa")
+    payload["document"]["title"] = "Very " * 200 + "Long Agreement"
+    payload["document"]["sha256"] = "e" * 64
+    deal, created = cv.store_record(
+        empty_vault, payload, counterparty_override=None, name_override=None, local_source=None,
+    )
+    assert created
+    assert all(len(part.encode("utf-8")) <= 80 for part in deal.split("/"))  # path-safe components
+    assert (empty_vault / deal / cv.RECORD_FILENAME).is_file()
+
+
 def test_ingest_commits_to_git(empty_vault: Path) -> None:
     before = cv._git(empty_vault, "rev-list", "--count", "HEAD").stdout.strip()
     cv.main(["ingest", str(EXTRACT_FIXTURES / "acme-msa.json"), "--vault", str(empty_vault)])

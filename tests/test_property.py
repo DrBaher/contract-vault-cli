@@ -131,6 +131,13 @@ def test_slugify_idempotent() -> None:
         once = cv.slugify(s)
         assert cv.slugify(once) == once
         assert " " not in once and "/" not in once
+        assert len(once) <= 80  # always a path-component-safe length
+
+
+def test_slugify_caps_long_input() -> None:
+    long = "word-" * 500
+    assert len(cv.slugify(long)) <= 80
+    assert not cv.slugify(long).endswith("-")
 
 
 def _write_record(vault: Path, rec: dict) -> None:

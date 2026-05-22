@@ -35,7 +35,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -176,9 +176,15 @@ def _why(args: argparse.Namespace, header: str, *lines: str) -> None:
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 
-def slugify(text: str) -> str:
-    """Filesystem- and url-safe slug. Falls back to 'untitled' for empty input."""
+def slugify(text: str, max_len: int = 80) -> str:
+    """Filesystem- and url-safe slug, capped to a path-component-safe length.
+
+    Falls back to 'untitled' for empty input. The cap keeps directory names well under
+    the 255-byte filesystem limit so long contract titles cannot crash ingest.
+    """
     out = _SLUG_RE.sub("-", text.strip().lower()).strip("-")
+    if len(out) > max_len:
+        out = out[:max_len].rstrip("-")
     return out or "untitled"
 
 
@@ -1640,6 +1646,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         except Exception:
             pass
         return EXIT_OK
+    except OSError as exc:
+        # Filesystem/git I/O failures (e.g. ENAMETOOLONG, permissions) -> clean error, no traceback.
+        _eprint(_red(f"error: {exc}"))
+        return EXIT_FAIL
     except KeyboardInterrupt:
         _eprint("interrupted")
         return 130

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "contract-vault"
-version = "0.1.1"
+version = "0.1.2"
 description = "Post-signature management layer of the contract-ops CLI suite: register, search and surface deadlines for SIGNED contracts."
 readme = "README.md"
 requires-python = ">=3.9"
