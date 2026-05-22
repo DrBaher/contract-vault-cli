@@ -88,3 +88,28 @@ def test_global_help(capsys: pytest.CaptureFixture[str]) -> None:
     rc = cv.main(["--help"])
     assert rc == 0
     assert "contract-vault" in capsys.readouterr().out
+
+
+def test_catalog_json(capsys: pytest.CaptureFixture[str]) -> None:
+    assert cv.main(["--catalog", "json"]) == 0
+    cat = json.loads(capsys.readouterr().out)
+    assert {"name", "bin", "version", "description", "commands", "exitCodes"} <= set(cat)
+    assert cat["name"] == "contract-vault" and cat["bin"] == "contract-vault"
+    assert cat["version"] == cv.__version__
+    assert set(cat["exitCodes"]) == {"0", "1", "2"}
+    for c in cat["commands"]:
+        assert set(c) == {"name", "help", "flags"}
+    # Drift guard: the catalog lists exactly the commands the parser accepts.
+    parser = cv.build_parser()
+    sub = next(a for a in parser._actions if isinstance(a, cv.argparse._SubParsersAction))
+    assert {c["name"] for c in cat["commands"]} == set(sub.choices)
+    # A representative command's flags are present (incl. aliases).
+    find = next(c for c in cat["commands"] if c["name"] == "find")
+    flag_names = {f["name"] for f in find["flags"]} | {a for f in find["flags"] for a in f["aliases"]}
+    assert {"--auto-renew", "--value-gt", "--currency"} <= flag_names
+
+
+def test_catalog_defaults_to_json_and_rejects_other(capsys: pytest.CaptureFixture[str]) -> None:
+    assert cv.main(["--catalog"]) == 0          # bare --catalog defaults to json
+    json.loads(capsys.readouterr().out)
+    assert cv.main(["--catalog", "yaml"]) == cv.EXIT_USAGE

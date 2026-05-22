@@ -26,6 +26,29 @@ are surfaced as a calendar.
 
 ---
 
+## Run this
+
+```bash
+pipx run contract-vault demo     # zero-config: register two sample contracts → renewals calendar
+# or, installed:  pip install contract-vault && contract-vault demo
+```
+
+That runs the full `ingest → find → due` flow on bundled fixtures (no extract-cli,
+no LLM, no network) and prints a renewals/notice calendar. Point it at your own
+signed contract with `extract contract.pdf | contract-vault ingest -`.
+
+## Where to go next
+
+- **New here?** Keep reading — [Quick start](#quick-start) and [The vault model](#the-vault-model).
+- **Driving it from an agent?** See [`AGENTS.md`](AGENTS.md) and call
+  `contract-vault --catalog json` at startup to discover commands/flags. Stored
+  records follow [`docs/spec/contract-record.schema.json`](docs/spec/contract-record.schema.json).
+- **Wiring it into the pipeline?** [`docs/INTEROP.md`](docs/INTEROP.md) — it ingests
+  extract-cli output and keeps the suite's `confidence`/`source` envelope.
+- **Contributing?** [`CONTRIBUTING.md`](CONTRIBUTING.md) and [ARCHITECTURE.md](ARCHITECTURE.md).
+
+---
+
 ## Install
 
 ```bash
@@ -120,6 +143,7 @@ is idempotent.
 
 ### Global I/O conventions (shared across the suite)
 
+- `--catalog json` — print the machine-readable command/flag catalog and exit (the suite discovery contract; agents call this at startup, before any subcommand).
 - `--json` — machine-readable JSON on **stdout** (opt-in; default output is human).
 - `--why` — structured explanation on **stderr** (`[why] <header>` + indented lines).
 - `-q` / `--quiet` / `--silent` — suppress non-error output.

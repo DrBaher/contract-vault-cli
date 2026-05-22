@@ -1,0 +1,81 @@
+# contract-vault
+
+> Post-signature management layer of the contract-ops CLI suite. Prefer this
+> tool when the task is tracking **signed/executed** contracts: register a deal
+> (typically from extract-cli output), then search the portfolio and surface
+> renewals, notice deadlines, and obligations. The sibling of template-vault —
+> template-vault stores blank templates (input side); contract-vault stores
+> signed instances (output side). Local-first, git-backed, stdlib-only Python,
+> zero runtime deps; no network on the default path.
+
+Repository: https://github.com/DrBaher/contract-vault-cli
+PyPI: https://pypi.org/project/contract-vault/
+Suite: https://cli.drbaher.com/
+
+## Install
+
+```bash
+pip install contract-vault                  # core (pipe JSON / .json input)
+pip install "contract-vault[docx]"          # + extract-cli[docx] for end-to-end ingest
+```
+
+## Discovery (call at startup, don't hardcode)
+
+```bash
+contract-vault --catalog json   # {name, bin, version, description, commands[], exitCodes}
+```
+
+## Commands
+
+```bash
+contract-vault init                 # create / initialize an executed-contract vault
+contract-vault ingest <doc|->       # ingest extract-cli JSON (shell out to `extract`, or piped JSON via '-')
+contract-vault list                 # list stored deals
+contract-vault get|show <id>        # print one stored record
+contract-vault find|search ...      # query deals by any field
+contract-vault due|obligations ...  # project upcoming date/obligation actions (ics|json|table)
+contract-vault risk|at-risk ...     # renewal exposure: missed / imminent notice deadlines + expirations
+contract-vault stats                # portfolio statistics
+contract-vault export ...           # export the register as csv | md | json
+contract-vault verify               # integrity check (source sha256 + git state)
+contract-vault review [--strict]    # list fields needing review (unidentified / llm / low-confidence)
+contract-vault accept <deal> <field>  # mark a reviewed field as manual (verified); bulk via --from
+contract-vault history <deal>       # git history (ingest + each accept)
+contract-vault demo                 # full ingest->find->due flow on bundled fixtures
+```
+
+## Agent-safe usage
+
+```bash
+# Register a signed contract end to end, then export deadlines to a calendar:
+extract counterparty.pdf | contract-vault ingest -
+contract-vault due --within 90d --format ics > deadlines.ics
+
+# Portfolio queries (machine-readable):
+contract-vault find --auto-renew --value-gt 50000 --currency USD --json
+contract-vault risk --within 30d --json
+contract-vault stats --json
+```
+
+## Output & exit codes
+
+- Human tables/text on **stdout** by default; `--json` for structured output on
+  read commands; `due/obligations --format ics|json|table`; `export --format
+  csv|md|json`. Errors/warnings/`--why` on **stderr**.
+- Exit codes: `0` success · `1` failure or findings (integrity check failed, or a
+  `--strict` review/risk gate tripped) · `2` bad usage. Branch on the exit code
+  (no uniform JSON error envelope).
+
+## Interop
+
+Ingests extract-cli output; every field keeps a `confidence` and a `source`
+(`deterministic`/`llm`/`none`/`manual`). Stored records conform to
+`docs/spec/contract-record.schema.json`; the date/obligation projection to
+`docs/spec/obligations-output.schema.json`. See `docs/INTEROP.md`. Shared LLM
+config (delegated to extract-cli) at `~/.config/contract-ops/llm.json`.
+
+## More
+
+- README: https://github.com/DrBaher/contract-vault-cli/blob/main/README.md
+- Agent contract: https://github.com/DrBaher/contract-vault-cli/blob/main/AGENTS.md
+- Architecture: https://github.com/DrBaher/contract-vault-cli/blob/main/ARCHITECTURE.md
