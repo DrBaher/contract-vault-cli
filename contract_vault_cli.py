@@ -41,7 +41,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 # ---------------------------------------------------------------------------
 # Constants

@@ -6,7 +6,7 @@ All notable changes to **contract-vault** are documented here. The format follow
 semver-meaningful: backward-incompatible record/output changes require a major bump;
 new optional fields are minor additions.
 
-## [Unreleased]
+## [0.4.1] - 2026-05-22
 
 ### Docs
 - **`docs/SCHEDULING.md`** + example **`scripts/contract-vault-remind.sh`** — how to run
@@ -237,6 +237,7 @@ Initial release: the post-signature management layer of the contract-ops CLI sui
   tests dependency-free; fixtures vendor sample extract JSON so the suite runs offline and
   without extract-cli installed. Property tests use stdlib `random.Random(seed)`.
 
+[0.4.1]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.4.1
 [0.4.0]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.4.0
 [0.3.1]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.3.1
 [0.3.0]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.3.0
