@@ -27,6 +27,7 @@ logic is purely deterministic and works fully with the LLM off.
 from __future__ import annotations
 
 import argparse
+import calendar
 import csv
 import datetime as dt
 import hashlib
@@ -40,7 +41,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -627,6 +628,68 @@ def finalize_obligations(obligations: List[JSONObj], carry: Optional[Dict[str, J
     return obligations
 
 
+# Recurrence ----------------------------------------------------------------
+
+RECURRENCE_FREQS = ("weekly", "monthly", "quarterly", "semiannual", "annual")
+_RECURRENCE_MONTHS = {"monthly": 1, "quarterly": 3, "semiannual": 6, "annual": 12}
+_RECURRENCE_PATTERNS = [
+    ("weekly", r"\bweekly\b|\bevery week\b|\beach week\b"),
+    ("quarterly", r"\bquarterly\b|\bevery quarter\b|\beach quarter\b"),
+    ("semiannual", r"\bsemi-?annual\w*\b|\bbi-?annual\w*\b|\bevery six months\b|\btwice a year\b"),
+    ("annual", r"\bannual\w*\b|\byearly\b|\bper annum\b|\bper year\b|\beach year\b|\bevery year\b"),
+    ("monthly", r"\bmonthly\b|\bevery month\b|\beach month\b|\bper month\b"),
+]
+
+
+def _add_months(d: dt.date, n: int) -> dt.date:
+    m = d.month - 1 + n
+    year = d.year + m // 12
+    month = m % 12 + 1
+    last = calendar.monthrange(year, month)[1]
+    return dt.date(year, month, min(d.day, last))
+
+
+def _step_recurrence(d: dt.date, freq: str) -> dt.date:
+    if freq == "weekly":
+        return d + dt.timedelta(days=7)
+    return _add_months(d, _RECURRENCE_MONTHS[freq])
+
+
+def detect_recurrence(text: str) -> Optional[str]:
+    """Conservatively detect a recurrence frequency word in obligation prose."""
+    low = text.lower()
+    for freq, rx in _RECURRENCE_PATTERNS:
+        if re.search(rx, low):
+            return freq
+    return None
+
+
+def recurrence_occurrences(anchor: dt.date, freq: str, start: dt.date, end: dt.date, *, cap: int = 400) -> List[dt.date]:
+    """Dates of a recurring obligation within [start, end], stepping from the anchor."""
+    if freq not in RECURRENCE_FREQS or end < start:
+        return []
+    d = anchor
+    guard = 0
+    while d < start and guard < 20000:
+        d = _step_recurrence(d, freq)
+        guard += 1
+    out: List[dt.date] = []
+    while d <= end and len(out) < cap:
+        out.append(d)
+        d = _step_recurrence(d, freq)
+    return out
+
+
+def obligation_reminders(ob: JSONObj) -> List[int]:
+    """Lead-day reminders for an obligation: explicit override, else the type default."""
+    r = ob.get("reminders")
+    if isinstance(r, list) and r:
+        leads = [int(x) for x in r if isinstance(x, (int, float)) and not isinstance(x, bool) and x >= 0]
+        if leads:
+            return sorted(set(leads), reverse=True)
+    return [_suggest_lead_days(str(ob.get("type", "")))]
+
+
 def build_record(
     payload: JSONObj,
     *,
@@ -744,16 +807,18 @@ def build_record(
         ob_dues: List[Optional[dt.date]] = [d for d in scan_dates(text)]
         if not ob_dues:
             ob_dues = [None]  # dateless obligation: still recorded, just no deadline
+        rec_freq = detect_recurrence(text)
         for due in ob_dues:
-            obligations.append(
-                {
-                    "type": "obligation",
-                    "due": due.isoformat() if due else None,
-                    "description": text,
-                    "source": ob_src,
-                    "confidence": round(oconf, 4),
-                }
-            )
+            entry: JSONObj = {
+                "type": "obligation",
+                "due": due.isoformat() if due else None,
+                "description": text,
+                "source": ob_src,
+                "confidence": round(oconf, 4),
+            }
+            if rec_freq and due is not None:  # only a dated obligation can recur (needs an anchor)
+                entry["recurrence"] = rec_freq
+            obligations.append(entry)
     finalize_obligations(obligations)  # stamp stable id + status=open + owner=null
 
     # Provenance ------------------------------------------------------------
@@ -845,6 +910,7 @@ def upcoming_obligations(
     rows: List[JSONObj] = []
     for rid, _dir, rec in load_all_records(vault):
         counterparty = primary_counterparty(rec)
+        exp_cap = parse_date(rec.get("expiration_date"))
         for ob in rec.get("obligations", []):
             if str(ob.get("status") or "open") not in include:
                 continue
@@ -852,28 +918,36 @@ def upcoming_obligations(
                 continue
             if owner_filter and str(ob.get("owner") or "").lower() != owner_filter.lower():
                 continue
-            due_s = ob.get("due")
-            if not due_s:
-                continue
-            due = parse_date(due_s)
-            if due is None or due < as_of or due > horizon:
-                continue
-            rows.append(
-                {
-                    "id": ob.get("id", obligation_id(ob)),
-                    "deal": rid,
-                    "counterparty": counterparty,
-                    "type": ob.get("type", "obligation"),
-                    "due": due.isoformat(),
-                    "days_until": (due - as_of).days,
-                    "description": ob.get("description", ""),
-                    "status": str(ob.get("status") or "open"),
-                    "owner": ob.get("owner"),
-                    "source": ob.get("source", SOURCE_NONE),
-                    "confidence": ob.get("confidence", 0.0),
-                    "lead_days": _suggest_lead_days(str(ob.get("type", ""))),
-                }
-            )
+            anchor = parse_date(ob.get("due"))
+            if anchor is None:
+                continue  # dateless obligation: tracked, but no calendar entry
+            freq = ob.get("recurrence") if ob.get("recurrence") in RECURRENCE_FREQS else None
+            if freq:
+                # Recurring: expand into occurrences, capped at the contract's expiration.
+                cap_end = min(horizon, exp_cap) if exp_cap else horizon
+                occurrences = recurrence_occurrences(anchor, str(freq), as_of, cap_end)
+            else:
+                occurrences = [anchor] if as_of <= anchor <= horizon else []
+            reminders = obligation_reminders(ob)
+            for due in occurrences:
+                rows.append(
+                    {
+                        "id": ob.get("id", obligation_id(ob)),
+                        "deal": rid,
+                        "counterparty": counterparty,
+                        "type": ob.get("type", "obligation"),
+                        "due": due.isoformat(),
+                        "days_until": (due - as_of).days,
+                        "description": ob.get("description", ""),
+                        "status": str(ob.get("status") or "open"),
+                        "owner": ob.get("owner"),
+                        "recurrence": freq,
+                        "reminders": reminders,
+                        "source": ob.get("source", SOURCE_NONE),
+                        "confidence": ob.get("confidence", 0.0),
+                        "lead_days": max(reminders),
+                    }
+                )
     rows.sort(key=lambda r: (r["due"], r["deal"]))
     return rows
 
@@ -1066,7 +1140,7 @@ def build_ics(rows: List[JSONObj], *, now: Optional[dt.datetime] = None) -> str:
         desc = f"{row['description']} [deal: {row['deal']}; source: {row['source']}]"
         uid_seed = f"{row['deal']}|{row['type']}|{row['due']}|{row['description']}"
         uid = sha256_bytes(uid_seed.encode("utf-8"))[:24] + "@contract-vault"
-        lead = int(row.get("lead_days", 7))
+        reminders = row.get("reminders") or [int(row.get("lead_days", 7))]
         lines.extend(
             [
                 "BEGIN:VEVENT",
@@ -1077,14 +1151,19 @@ def build_ics(rows: List[JSONObj], *, now: Optional[dt.datetime] = None) -> str:
                 _ics_fold(f"SUMMARY:{_ics_escape(summary)}"),
                 _ics_fold(f"DESCRIPTION:{_ics_escape(desc)}"),
                 "TRANSP:TRANSPARENT",
-                "BEGIN:VALARM",
-                "ACTION:DISPLAY",
-                _ics_fold(f"DESCRIPTION:{_ics_escape('Reminder: ' + summary)}"),
-                f"TRIGGER:-P{lead}D",
-                "END:VALARM",
-                "END:VEVENT",
             ]
         )
+        for lead in reminders:  # one VALARM per configured reminder lead-time
+            lines.extend(
+                [
+                    "BEGIN:VALARM",
+                    "ACTION:DISPLAY",
+                    _ics_fold(f"DESCRIPTION:{_ics_escape('Reminder: ' + summary)}"),
+                    f"TRIGGER:-P{int(lead)}D",
+                    "END:VALARM",
+                ]
+            )
+        lines.append("END:VEVENT")
     lines.append("END:VCALENDAR")
     return "\r\n".join(lines) + "\r\n"
 
@@ -1371,8 +1450,10 @@ def cmd_get(args: argparse.Namespace) -> int:
         _out("  obligations:")
         for ob in obs:
             owner = f" @{ob.get('owner')}" if ob.get("owner") else ""
+            recur = f" every {ob.get('recurrence')}" if ob.get("recurrence") else ""
+            rem = f" reminders={ob.get('reminders')}" if ob.get("reminders") else ""
             st = str(ob.get("status") or "open")
-            _out(f"    - {_dim(str(ob.get('id', '')))} [{ob.get('type')}] {st}{owner} due {ob.get('due') or '-'}  {ob.get('description')}  ({ob.get('source')}, conf {ob.get('confidence')})")
+            _out(f"    - {_dim(str(ob.get('id', '')))} [{ob.get('type')}] {st}{owner}{recur}{rem} due {ob.get('due') or '-'}  {ob.get('description')}  ({ob.get('source')}, conf {ob.get('confidence')})")
     prov = rec.get("provenance", {})
     _out(_dim(f"  provenance:      from_extract={prov.get('from_extract')} extractor={prov.get('extractor_version')} llm_used={prov.get('llm_used')} ingested {prov.get('ingested_at')}"))
     flags = review_flags(rec)
@@ -1516,7 +1597,8 @@ def cmd_due(args: argparse.Namespace) -> int:
     for r in rows:
         when = _yellow(r["due"]) if r["days_until"] <= 14 else r["due"]
         owner = f"  @{r['owner']}" if r.get("owner") else ""
-        _out(f"  {_dim(str(r['id']))}  {when}  (+{r['days_until']}d)  {_bold(str(r['type']))}  {r['counterparty']}{owner}  -- {r['description']}")
+        recur = _dim(f" (every {r['recurrence']})") if r.get("recurrence") else ""
+        _out(f"  {_dim(str(r['id']))}  {when}  (+{r['days_until']}d)  {_bold(str(r['type']))}{recur}  {r['counterparty']}{owner}  -- {r['description']}")
     return EXIT_OK
 
 
@@ -2024,29 +2106,57 @@ def find_obligation(record: JSONObj, ref: str) -> JSONObj:
 
 
 def cmd_obligation(args: argparse.Namespace) -> int:
-    """Track an obligation's lifecycle: set its status (open/done/waived) and/or owner.
+    """Track an obligation: status (open/done/waived), owner, recurrence, and reminders.
     Deterministic and local -- commits to the vault. Never calls an LLM."""
     vault = resolve_vault(args)
     rid, deal_dir, rec = find_deal(vault, args.deal)
     ob = find_obligation(rec, args.id)
     status = getattr(args, "status", None)
     owner = getattr(args, "owner", None)
-    if status is None and owner is None:
-        raise UsageError("provide --status {open,done,waived} and/or --owner NAME")
+    recurrence = getattr(args, "recurrence", None)
+    reminders_arg = getattr(args, "reminders", None)
+    if status is None and owner is None and recurrence is None and reminders_arg is None:
+        raise UsageError("provide --status, --owner, --recurrence, and/or --reminders")
     if status is not None:
         if status not in OBLIGATION_STATUSES:
             raise UsageError(f"invalid --status {status!r}; choose from {', '.join(OBLIGATION_STATUSES)}")
         ob["status"] = status
     if owner is not None:
         ob["owner"] = owner or None  # empty string clears the owner
+    if recurrence is not None:
+        if recurrence == "none":
+            ob.pop("recurrence", None)
+        else:
+            ob["recurrence"] = recurrence  # argparse choices guarantee validity
+    if reminders_arg is not None:
+        if reminders_arg.strip() == "":
+            ob.pop("reminders", None)  # fall back to the type default
+        else:
+            try:
+                vals = [int(x) for x in reminders_arg.replace(" ", "").split(",") if x]
+            except ValueError:
+                raise UsageError("--reminders must be comma-separated day counts, e.g. 30,7")
+            if any(v < 0 for v in vals):
+                raise UsageError("--reminders must be non-negative day counts")
+            ob["reminders"] = sorted(set(vals), reverse=True)
     rec.setdefault("provenance", {})["last_reviewed_at"] = _now_iso()
     (deal_dir / RECORD_FILENAME).write_text(_dump_json(rec), encoding="utf-8")
-    git_commit(vault, f"obligation: {rid} {ob['id']} status={ob.get('status')} owner={ob.get('owner')}", paths=[deal_dir])
-    _why(args, "obligation", f"deal={rid}", f"id={ob['id']}", f"status={ob.get('status')}", f"owner={ob.get('owner')}")
+    git_commit(vault, f"obligation: {rid} {ob['id']} status={ob.get('status')}", paths=[deal_dir])
+    _why(args, "obligation", f"deal={rid}", f"id={ob['id']}", f"status={ob.get('status')}",
+         f"owner={ob.get('owner')}", f"recurrence={ob.get('recurrence')}", f"reminders={ob.get('reminders')}")
     if getattr(args, "json", False):
-        _emit_json({"deal": rid, "id": ob["id"], "type": ob.get("type"), "status": ob.get("status"), "owner": ob.get("owner"), "due": ob.get("due")})
+        _emit_json({"deal": rid, "id": ob["id"], "type": ob.get("type"), "status": ob.get("status"),
+                    "owner": ob.get("owner"), "recurrence": ob.get("recurrence"), "reminders": ob.get("reminders"),
+                    "due": ob.get("due")})
     else:
-        _out(_green(f"{rid} :: {ob['id']} [{ob.get('type')}] -> status={ob.get('status')}" + (f" owner={ob.get('owner')}" if ob.get("owner") else "")))
+        bits = [f"status={ob.get('status')}"]
+        if ob.get("owner"):
+            bits.append(f"owner={ob.get('owner')}")
+        if ob.get("recurrence"):
+            bits.append(f"recurrence={ob.get('recurrence')}")
+        if ob.get("reminders"):
+            bits.append(f"reminders={ob.get('reminders')}")
+        _out(_green(f"{rid} :: {ob['id']} [{ob.get('type')}] -> " + " ".join(bits)))
     return EXIT_OK
 
 
@@ -2325,6 +2435,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_ob.add_argument("id", help="obligation id, id-prefix, or [index] (from `get`/`obligations`)")
     p_ob.add_argument("--status", choices=list(OBLIGATION_STATUSES), help="set status (open/done/waived)")
     p_ob.add_argument("--owner", help="set responsible owner (empty string clears it)")
+    p_ob.add_argument("--recurrence", choices=["none", *RECURRENCE_FREQS], help="set recurrence (none clears it)")
+    p_ob.add_argument("--reminders", metavar="DAYS", help="reminder lead-times, comma-separated, e.g. 30,7 (empty resets to default)")
     p_ob.set_defaults(func=cmd_obligation)
 
     p_demo = sub.add_parser("demo", help="run the full ingest->find->due flow on bundled fixtures")

@@ -121,7 +121,9 @@
           "confidence": { "$ref": "#/$defs/confidence" },
           "id": { "type": "string" },
           "status": { "enum": ["open", "done", "waived"] },
-          "owner": { "$ref": "#/$defs/nullableString" }
+          "owner": { "$ref": "#/$defs/nullableString" },
+          "recurrence": { "enum": ["weekly", "monthly", "quarterly", "semiannual", "annual"] },
+          "reminders": { "type": "array", "items": { "type": "integer", "minimum": 0 } }
         }
       }
     },

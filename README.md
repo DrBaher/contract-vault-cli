@@ -131,7 +131,7 @@ is idempotent.
 | `get <id>` / `show <id>` | Print one record (by path, leaf name, or unique prefix). |
 | `find` / `search` | Query by `--counterparty`, `--governing-law`, `--currency CCC`, `--expiring-before DATE`, `--value-gt N`, `--auto-renew`, or full-text. Pair `--currency` with `--value-gt` for currency-aware thresholds. |
 | `due` / `obligations` | Project upcoming actions. `--within 30d\|60d\|90d`, `--format ics\|json\|table`, `--status open\|done\|waived\|all` (default open), `--type`, `--owner`. Emits valid RFC 5545 `.ics`. |
-| `obligation <deal> <id>` | Track an obligation's lifecycle: `--status open\|done\|waived` and/or `--owner NAME`. Completed obligations drop off `due`. |
+| `obligation <deal> <id>` | Track an obligation: `--status open\|done\|waived`, `--owner NAME`, `--recurrence weekly\|monthly\|quarterly\|semiannual\|annual`, `--reminders 30,7`. Completed obligations drop off `due`; recurring ones expand into occurrences. |
 | `stats` | Portfolio stats: count, total value, expiring soon, by counterparty / governing law. |
 | `export` | Export the register as `csv` / `md` / `json` (`--expiring-before`, `--needs-review`). For spreadsheets & reports. |
 | `verify` | Integrity check: source `sha256` matches + git tree clean. |

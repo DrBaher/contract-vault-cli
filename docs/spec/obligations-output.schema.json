@@ -36,6 +36,8 @@
           "description",
           "status",
           "owner",
+          "recurrence",
+          "reminders",
           "source",
           "confidence",
           "lead_days"
@@ -50,6 +52,8 @@
           "description": { "type": "string" },
           "status": { "enum": ["open", "done", "waived"] },
           "owner": { "type": ["string", "null"] },
+          "recurrence": { "type": ["string", "null"] },
+          "reminders": { "type": "array", "items": { "type": "integer", "minimum": 0 } },
           "source": { "$ref": "#/$defs/source" },
           "confidence": { "$ref": "#/$defs/confidence" },
           "lead_days": { "type": "integer", "minimum": 0 }

@@ -24,9 +24,10 @@ use it.
   **`--format`**: `due --format ics|json|table` (ICS calendar feed), `export
   --format csv|md|json`. `--json` forces JSON where a `--format` also exists.
 - **Write commands** mutate the vault and commit: `ingest`, `accept <deal> <field>`
-  (mark a field `manual`; bulk `--from`), and `obligation <deal> <id> --status
-  open|done|waived [--owner …]` (track obligation lifecycle). `due`/`obligations` is
-  status-aware — only **open** obligations by default (`--status`, `--type`, `--owner`).
+  (mark a field `manual`; bulk `--from`), and `obligation <deal> <id>` (track lifecycle:
+  `--status open|done|waived`, `--owner`, `--recurrence`, `--reminders`). `due`/`obligations`
+  is status-aware — only **open** obligations by default (`--status`, `--type`, `--owner`) —
+  and expands recurring obligations into occurrences.
 - **stderr** is for humans only: `--why` explanations, warnings, and errors.
   stdout stays clean for piping (`| jq`, `> deadlines.ics`).
 - **Failure**: a one-line `error: <message>` on **stderr**, non-zero exit. There

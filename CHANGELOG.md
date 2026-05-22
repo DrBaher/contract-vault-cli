@@ -6,6 +6,21 @@ All notable changes to **contract-vault** are documented here. The format follow
 semver-meaningful: backward-incompatible record/output changes require a major bump;
 new optional fields are minor additions.
 
+## [0.3.0] - 2026-05-22
+
+### Added — recurring obligations + per-obligation reminders
+- **Recurrence.** Obligations can recur (`weekly` | `monthly` | `quarterly` | `semiannual` |
+  `annual`). A frequency word in the obligation text (e.g. "quarterly report") is detected
+  at ingest, or set explicitly with `obligation <deal> <id> --recurrence quarterly`
+  (`none` clears). `due`/`obligations` **expand** a recurring obligation into its
+  occurrences within the window, capped at the contract's expiration; each occurrence is
+  its own `.ics` VEVENT.
+- **Per-obligation reminders.** `obligation <deal> <id> --reminders 30,7` sets custom
+  reminder lead-times (days before), overriding the type default; each becomes a separate
+  `VALARM` on every occurrence. Empty `--reminders ""` resets to the default.
+- `due --format json` rows and the record schema gain `recurrence` and `reminders`
+  (backward-compatible optional additions). `get` and the `due` table show them.
+
 ## [0.2.0] - 2026-05-22
 
 ### Added — obligation lifecycle tracking
@@ -189,6 +204,7 @@ Initial release: the post-signature management layer of the contract-ops CLI sui
   tests dependency-free; fixtures vendor sample extract JSON so the suite runs offline and
   without extract-cli installed. Property tests use stdlib `random.Random(seed)`.
 
+[0.3.0]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.3.0
 [0.2.0]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.2.0
 [0.1.8]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.8
 [0.1.7]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.1.7
