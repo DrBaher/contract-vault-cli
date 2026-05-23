@@ -58,6 +58,28 @@ This marks `record.json` and `source.*` as git-crypt-encrypted via `.gitattribut
 and any remote, *not* the local working copy, so keep full-disk encryption on too. Existing
 plaintext history is not retroactively encrypted; enable `--encrypt` on a fresh vault.
 
+## Supply chain & CI integrity
+
+- **GitHub Actions are pinned to full commit SHAs** (not floating tags). This matters most
+  in `publish.yml`, which holds `id-token: write` (PyPI publishing rights) — a compromised
+  floating action tag there could otherwise publish a malicious release. **Dependabot**
+  (`github-actions`, weekly) keeps the pinned SHAs current.
+- **Trusted Publishing + build attestations.** Releases publish via PyPI Trusted Publishing
+  (OIDC; no stored token) with PEP 740 **attestations: true**, so each artifact carries
+  verifiable build provenance.
+- **Static analysis in CI:** **Bandit** (medium+ severity) and **CodeQL** (security-extended)
+  run on every push/PR — a guard against introducing `shell=True`, `eval`, `pickle`, etc.
+- **Least-privilege workflows:** `contents: read` by default; `id-token: write` only on the
+  publish job.
+
+## Recommended repository settings (maintainer toggles — not enforceable from the repo)
+
+- [ ] **Protect the `pypi` deployment environment** (Settings → Environments → `pypi` →
+      required reviewers) so a publish needs human approval.
+- [ ] **Branch protection on `main`:** require a PR, passing CI, and review (CODEOWNERS is in
+      `.github/CODEOWNERS`).
+- [ ] Enable **GitHub code scanning** so CodeQL results surface in the Security tab.
+
 ## Hardening checklist
 
 - [ ] Vault on a full-disk-encrypted volume

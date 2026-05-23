@@ -6,6 +6,16 @@ All notable changes to **contract-vault** are documented here. The format follow
 semver-meaningful: backward-incompatible record/output changes require a major bump;
 new optional fields are minor additions.
 
+## [Unreleased]
+
+### Security (supply chain / CI — no package code change)
+- **GitHub Actions pinned to commit SHAs** (was floating tags) — closes the highest-impact
+  CI risk, since `publish.yml` holds PyPI publishing rights. **Dependabot** keeps them current.
+- **PEP 740 build attestations** enabled on publish (verifiable artifact provenance).
+- **Bandit** (medium+) and **CodeQL** (security-extended) static analysis added to CI.
+- `CODEOWNERS` added; `SECURITY.md` documents supply-chain measures + recommended repo
+  settings (protected `pypi` environment, branch protection).
+
 ## [0.5.0] - 2026-05-23
 
 ### Security
