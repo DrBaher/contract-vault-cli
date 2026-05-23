@@ -6,6 +6,21 @@ All notable changes to **contract-vault** are documented here. The format follow
 semver-meaningful: backward-incompatible record/output changes require a major bump;
 new optional fields are minor additions.
 
+## [0.5.0] - 2026-05-23
+
+### Security
+- **Owner-only permissions (POSIX).** The vault directory is created `0700` and
+  `record.json` / vaulted source files `0600` — defense in depth alongside disk encryption.
+- **Untrusted input is no longer trusted with the filesystem.** Ingesting piped or `.json`
+  extract output no longer copies `document.source_path` into the vault — a crafted payload
+  could otherwise have pointed it at an arbitrary local file (e.g. `~/.ssh/id_rsa`). Only
+  `ingest <doc>` (a file you chose on the command line) vaults the source document.
+- **Opt-in encryption at rest:** `init --encrypt` scaffolds **git-crypt** for `record.json`
+  and source documents (encrypts what's committed/pushed; the working tree stays usable).
+  Uses the proven git-crypt tool — no home-grown crypto, zero added runtime dependencies.
+- **`SECURITY.md`** — security model, private vulnerability-reporting policy, and a hardening
+  checklist; README gains a Security section.
+
 ## [0.4.2] - 2026-05-22
 
 ### Changed (hardening for adoption — no new commands)
@@ -255,6 +270,7 @@ Initial release: the post-signature management layer of the contract-ops CLI sui
   tests dependency-free; fixtures vendor sample extract JSON so the suite runs offline and
   without extract-cli installed. Property tests use stdlib `random.Random(seed)`.
 
+[0.5.0]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.5.0
 [0.4.2]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.4.2
 [0.4.1]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.4.1
 [0.4.0]: https://github.com/DrBaher/contract-vault-cli/releases/tag/v0.4.0

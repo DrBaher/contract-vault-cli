@@ -41,7 +41,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
-__version__ = "0.4.2"
+__version__ = "0.5.0"
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -108,6 +108,15 @@ def _configure_streams() -> None:
                 reconfigure(encoding="utf-8", newline="")
             except (ValueError, OSError):
                 pass
+
+
+def _harden(path: Path, mode: int) -> None:
+    """Best-effort restrictive permissions on a vault path (owner-only). POSIX-effective;
+    a no-op-ish on Windows/odd filesystems. Never raises."""
+    try:
+        path.chmod(mode)
+    except OSError:
+        pass
 
 
 def _rmtree_force(path: str) -> None:
@@ -527,6 +536,7 @@ def load_vault_config(vault: Path) -> JSONObj:
 
 def save_vault_config(vault: Path, config: JSONObj) -> None:
     (vault / VAULT_CONFIG_NAME).write_text(_dump_json(config), encoding="utf-8")
+    _harden(vault / VAULT_CONFIG_NAME, 0o600)
 
 
 def resolve_vault(args: argparse.Namespace) -> Path:
@@ -1300,8 +1310,11 @@ def acquire_payload(args: argparse.Namespace) -> Tuple[JSONObj, Optional[Path]]:
             raise VaultError(f"{path} is not valid JSON: {exc}") from exc
         if isinstance(data, dict) and "document" in data and "_meta" in data:
             payload = validate_extract_payload(data)
-            src = payload.get("document", {}).get("source_path")
-            return payload, (Path(src) if src and Path(str(src)).exists() else None)
+            # SECURITY: do NOT trust document.source_path from a piped/.json payload. A
+            # crafted file could point it at an arbitrary local path (e.g. ~/.ssh/id_rsa)
+            # and copy it into the vault. Only `ingest <doc>` (a file the user chose) vaults
+            # the source; here source_path is kept as metadata only (vaulted=False).
+            return payload, None
     # Otherwise treat it as a document and delegate extraction.
     payload = run_extract(path, use_llm=getattr(args, "llm", False))
     return payload, path
@@ -1347,6 +1360,7 @@ def store_record(
         n += 1
     deal_dir = vault / rel
     deal_dir.mkdir(parents=True, exist_ok=True)
+    _harden(deal_dir, 0o700)
 
     # Vault the source document if we have a readable local copy.
     source_vaulted = False
@@ -1356,6 +1370,7 @@ def store_record(
         ext = local_source.suffix or {"markdown": ".md", "text": ".txt", "pdf": ".pdf", "docx": ".docx", "html": ".html"}.get(fmt, "")
         dest = deal_dir / f"source{ext}"
         shutil.copy2(local_source, dest)
+        _harden(dest, 0o600)
         source_rel = dest.name
         source_vaulted = True
         actual = sha256_file(dest)
@@ -1369,7 +1384,9 @@ def store_record(
         source_rel_path=source_rel or "(not vaulted)",
         source_vaulted=source_vaulted,
     )
-    (deal_dir / RECORD_FILENAME).write_text(_dump_json(record), encoding="utf-8")
+    record_path = deal_dir / RECORD_FILENAME
+    record_path.write_text(_dump_json(record), encoding="utf-8")
+    _harden(record_path, 0o600)
 
     git_commit(vault, f"ingest: {rel}", paths=[deal_dir])
     return rel, True
@@ -1382,6 +1399,13 @@ def store_record(
 
 def cmd_init(args: argparse.Namespace) -> int:
     path = Path(getattr(args, "path", None) or ".").expanduser().resolve()
+    encrypt = getattr(args, "encrypt", False)
+    if encrypt and shutil.which("git-crypt") is None:
+        raise UsageError(
+            "--encrypt needs git-crypt, which is not on PATH.\n"
+            "  Install it (e.g. `brew install git-crypt` or `apt-get install git-crypt`), then re-run.\n"
+            "  Vault not created (so it can't look encrypted when it isn't)."
+        )
     path.mkdir(parents=True, exist_ok=True)
     if is_vault(path):
         _out(_yellow(f"already a contract-vault: {path}"))
@@ -1390,13 +1414,18 @@ def cmd_init(args: argparse.Namespace) -> int:
         raise VaultError("git is required but was not found on PATH")
     if not (path / ".git").exists():
         _git(path, "init", "-q")
+    _harden(path, 0o700)  # owner-only vault dir (defense in depth alongside disk encryption)
+    if encrypt:
+        _enable_encryption(path)
     config = {
         "schema_version": RECORD_SCHEMA_VERSION,
         "kind": VAULT_KIND,
         "created": _now_iso(),
         "tool": f"contract-vault {__version__}",
+        "encrypted": bool(encrypt),
     }
     (path / VAULT_CONFIG_NAME).write_text(_dump_json(config), encoding="utf-8")
+    _harden(path / VAULT_CONFIG_NAME, 0o600)
     readme = path / "README.md"
     if not readme.exists():
         readme.write_text(
@@ -1405,13 +1434,37 @@ def cmd_init(args: argparse.Namespace) -> int:
             "Each deal lives under `<counterparty>/<name>/record.json` alongside its source document.\n",
             encoding="utf-8",
         )
-    git_commit(path, "init: contract-vault")
-    _why(args, "init", f"vault={path}", f"git={'new' if not (path / '.git').exists() else 'existing'}")
+    git_commit(path, "init: contract-vault" + (" (git-crypt encrypted)" if encrypt else ""))
+    _why(args, "init", f"vault={path}", f"encrypted={bool(encrypt)}")
     if getattr(args, "json", False):
-        _emit_json({"vault": str(path), "kind": VAULT_KIND, "schema_version": RECORD_SCHEMA_VERSION})
+        _emit_json({"vault": str(path), "kind": VAULT_KIND, "schema_version": RECORD_SCHEMA_VERSION, "encrypted": bool(encrypt)})
     else:
-        _out(_green(f"Initialized contract-vault at {path}"))
+        _out(_green(f"Initialized contract-vault at {path}") + (_dim("  [encrypted at rest via git-crypt]") if encrypt else ""))
+        if encrypt:
+            _out(_dim("  Back up the key: `git-crypt export-key <file>` (without it, encrypted history is unrecoverable)."))
     return EXIT_OK
+
+
+def _enable_encryption(vault: Path) -> None:
+    """Turn on git-crypt encryption-at-rest for record.json + source documents.
+
+    Encrypts what is committed/pushed (the working tree stays plaintext so the CLI works
+    normally). Not a substitute for disk encryption + restrictive perms on the working copy.
+    """
+    _git(vault, "config", "--local", "user.useConfigOnly", "false", check=False)
+    proc = subprocess.run(["git-crypt", "init"], cwd=str(vault), text=True, capture_output=True)
+    if proc.returncode != 0 and "already" not in (proc.stderr + proc.stdout).lower():
+        raise VaultError(f"git-crypt init failed: {proc.stderr.strip() or proc.stdout.strip()}")
+    gitattributes = vault / ".gitattributes"
+    gitattributes.write_text(
+        "# contract-vault: encrypt deal records and source documents at rest (git-crypt).\n"
+        "**/record.json filter=git-crypt diff=git-crypt\n"
+        "**/source.* filter=git-crypt diff=git-crypt\n"
+        ".contract-vault.json !filter !diff\n"
+        ".gitattributes !filter !diff\n"
+        "README.md !filter !diff\n",
+        encoding="utf-8",
+    )
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
@@ -2068,6 +2121,7 @@ def cmd_accept(args: argparse.Namespace) -> int:
             recompute_schedule(rec)
         rec.setdefault("provenance", {})["last_reviewed_at"] = _now_iso()
         (deal_dir / RECORD_FILENAME).write_text(_dump_json(rec), encoding="utf-8")
+        _harden(deal_dir / RECORD_FILENAME, 0o600)
         paths.append(deal_dir)
 
     if from_file:
@@ -2241,6 +2295,7 @@ def cmd_obligation(args: argparse.Namespace) -> int:
             ob["reminders"] = sorted(set(vals), reverse=True)
     rec.setdefault("provenance", {})["last_reviewed_at"] = _now_iso()
     (deal_dir / RECORD_FILENAME).write_text(_dump_json(rec), encoding="utf-8")
+    _harden(deal_dir / RECORD_FILENAME, 0o600)
     git_commit(vault, f"obligation: {rid} {ob['id']} status={ob.get('status')}", paths=[deal_dir])
     _why(args, "obligation", f"deal={rid}", f"id={ob['id']}", f"status={ob.get('status')}",
          f"owner={ob.get('owner')}", f"recurrence={ob.get('recurrence')}", f"reminders={ob.get('reminders')}")
@@ -2493,6 +2548,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_init = sub.add_parser("init", help="create / initialize an executed-contract vault")
     _add_common(p_init)
     p_init.add_argument("path", nargs="?", help="vault directory (default: current directory)")
+    p_init.add_argument("--encrypt", action="store_true", help="encrypt records + sources at rest via git-crypt (requires git-crypt)")
     p_init.set_defaults(func=cmd_init)
 
     p_ing = sub.add_parser("ingest", help="ingest extract-cli JSON (shell out to `extract`, or read piped JSON via '-')")

@@ -124,7 +124,7 @@ is idempotent.
 
 | Command | What it does |
 |---|---|
-| `init [path]` | Create / initialize an executed-contract vault (a git repo). |
+| `init [path]` | Create / initialize an executed-contract vault (a git repo). `--encrypt` enables git-crypt encryption at rest. |
 | `ingest <file>` | Run `extract <file> --json` (if on PATH) and store + commit the record. |
 | `ingest -` | Read piped extract JSON from stdin (`extract f --json \| contract-vault ingest -`). |
 | `list` | List stored deals. |
@@ -268,6 +268,21 @@ contract-vault accept acme-corp/msa value            # accept the current value 
 ```
 
 ---
+
+## Security
+
+It stores executed contracts, so security matters — see **[`SECURITY.md`](SECURITY.md)** for
+the full model. In brief:
+
+- **No network, no telemetry, no in-tool LLM, zero runtime deps.** JSON-only parsing
+  (no `eval`/`pickle`/`yaml`); subprocess calls are shell-free; paths are slug-contained.
+- **Owner-only permissions** (POSIX): the vault is `0700`, records/sources `0600`.
+- **Untrusted input** can't pull arbitrary files in: piped/`.json` `source_path` is metadata
+  only; only `ingest <doc>` vaults a file you chose.
+- **The working copy is plaintext** — protect it with full-disk encryption, a **private**
+  git remote, and optionally **`contract-vault init --encrypt`** (git-crypt encrypts what's
+  committed/pushed; back up the key).
+- **Integrity/audit:** `verify` (SHA-256 + clean git tree) and `history <deal>`.
 
 ## Interop
 
