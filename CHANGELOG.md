@@ -16,6 +16,29 @@ new optional fields are minor additions.
 - `CODEOWNERS` added; `SECURITY.md` documents supply-chain measures + recommended repo
   settings (protected `pypi` environment, branch protection).
 
+## [0.5.1] - 2026-05-31
+
+### Fixed
+- **Month-end recurrence drift (deadline miss).** A recurring obligation anchored on a
+  month-end day (e.g. the 31st) was advanced by re-applying the step to the *previously
+  clamped* date, so Jan 31 → Feb 28 then stuck at the 28th forever — every later deadline
+  computed days early. Occurrences are now computed from the original anchor, so the series
+  recovers: Jan 31 → Feb 28/29 → Mar 31 → Apr 30 → May 31. Verified for monthly, quarterly,
+  and annual (incl. Feb-29 anchors).
+- **Malformed / hand-edited `record.json` no longer crashes with a traceback.** `record.json`
+  is user- and git-editable; a `null`/string/list where a dict or list was expected
+  (`value`, `term`, `source`, `provenance`, `parties`, `field_meta`, `obligations`,
+  `renewal_window`) previously raised `AttributeError`/`TypeError` out of `get`/`list`/`find`/
+  `stats`/`verify`/`export`/`due`/`risk`/`review`/`accept`. All read/derive sites now coerce
+  defensively (empty result or clean error). The `obligation` command no longer raises
+  `KeyError: 'id'` on an index-resolved obligation that lacks an id (it stamps the stable id).
+- **`main()` catch-all backstop.** Any unexpected exception now prints a clean `error: …`
+  and exits `2` instead of dumping a Python traceback.
+
+### Changed
+- **Atomic vault writes.** `record.json` and `.contract-vault.json` are now written via a
+  temp file + `os.replace`, so a crash mid-write can no longer truncate/corrupt them.
+
 ## [0.5.0] - 2026-05-23
 
 ### Security

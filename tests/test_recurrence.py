@@ -60,6 +60,41 @@ def test_recurrence_occurrences_window_and_rollforward() -> None:
     assert occ2 and occ2[0] >= dt.date(2026, 1, 1) and occ2[-1] <= dt.date(2026, 12, 31)
 
 
+def test_recurrence_month_end_recovers_not_stuck_at_28() -> None:
+    # A 31st anchor stepped monthly must recover to the true month-end each month,
+    # never getting permanently clamped to Feb's 28th (the deadline-drift bug).
+    occ = cv.recurrence_occurrences(
+        dt.date(2026, 1, 31), "monthly", dt.date(2026, 1, 1), dt.date(2026, 5, 31)
+    )
+    assert occ == [
+        dt.date(2026, 1, 31),
+        dt.date(2026, 2, 28),  # clamped for Feb
+        dt.date(2026, 3, 31),  # recovers to the 31st
+        dt.date(2026, 4, 30),  # clamped for Apr
+        dt.date(2026, 5, 31),  # recovers again
+    ]
+
+
+def test_recurrence_month_end_leap_february() -> None:
+    occ = cv.recurrence_occurrences(
+        dt.date(2024, 1, 31), "monthly", dt.date(2024, 1, 1), dt.date(2024, 3, 31)
+    )
+    assert occ == [dt.date(2024, 1, 31), dt.date(2024, 2, 29), dt.date(2024, 3, 31)]
+
+
+def test_recurrence_quarterly_and_annual_step_from_anchor() -> None:
+    # Quarterly from a 31st anchor: Jan 31 -> Apr 30 -> Jul 31 -> Oct 31.
+    q = cv.recurrence_occurrences(
+        dt.date(2026, 1, 31), "quarterly", dt.date(2026, 1, 1), dt.date(2026, 12, 31)
+    )
+    assert q == [dt.date(2026, 1, 31), dt.date(2026, 4, 30), dt.date(2026, 7, 31), dt.date(2026, 10, 31)]
+    # Annual from a Feb-29 anchor recovers to Feb 28 on non-leap years and Feb 29 on leap years.
+    a = cv.recurrence_occurrences(
+        dt.date(2024, 2, 29), "annual", dt.date(2024, 1, 1), dt.date(2028, 12, 31)
+    )
+    assert a == [dt.date(2024, 2, 29), dt.date(2025, 2, 28), dt.date(2026, 2, 28), dt.date(2027, 2, 28), dt.date(2028, 2, 29)]
+
+
 def test_build_record_auto_detects_recurrence(empty_vault: Path) -> None:
     deal = _ingest(empty_vault, _payload("Quarterly business review to be completed by 2026-06-05."))
     assert _obl(_read(empty_vault, deal)).get("recurrence") == "quarterly"

@@ -38,10 +38,11 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -117,6 +118,28 @@ def _harden(path: Path, mode: int) -> None:
         path.chmod(mode)
     except OSError:
         pass
+
+
+def _atomic_write_text(path: Path, data: str, *, mode: Optional[int] = None) -> None:
+    """Write text atomically: a sibling temp file + os.replace, so a crash mid-write
+    never leaves a truncated/partial record.json or .contract-vault.json. os.replace
+    is atomic on the same filesystem (POSIX + Windows)."""
+    directory = path.parent
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(directory))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        if mode is not None:
+            _harden(Path(tmp), mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _rmtree_force(path: str) -> None:
@@ -535,8 +558,7 @@ def load_vault_config(vault: Path) -> JSONObj:
 
 
 def save_vault_config(vault: Path, config: JSONObj) -> None:
-    (vault / VAULT_CONFIG_NAME).write_text(_dump_json(config), encoding="utf-8")
-    _harden(vault / VAULT_CONFIG_NAME, 0o600)
+    _atomic_write_text(vault / VAULT_CONFIG_NAME, _dump_json(config), mode=0o600)
 
 
 def resolve_vault(args: argparse.Namespace) -> Path:
@@ -704,6 +726,16 @@ def _step_recurrence(d: dt.date, freq: str) -> dt.date:
     return _add_months(d, _RECURRENCE_MONTHS[freq])
 
 
+def _nth_occurrence(anchor: dt.date, freq: str, k: int) -> dt.date:
+    """The k-th occurrence (k >= 0) of a recurrence, computed from the ORIGINAL
+    anchor so month-end clamping never accumulates. A 31st anchor stepped monthly
+    yields Jan 31 -> Feb 28/29 -> Mar 31 -> Apr 30 instead of getting stuck at 28.
+    """
+    if freq == "weekly":
+        return anchor + dt.timedelta(days=7 * k)
+    return _add_months(anchor, _RECURRENCE_MONTHS[freq] * k)
+
+
 def detect_recurrence(text: str) -> Optional[str]:
     """Conservatively detect a recurrence frequency word in obligation prose."""
     low = text.lower()
@@ -717,15 +749,18 @@ def recurrence_occurrences(anchor: dt.date, freq: str, start: dt.date, end: dt.d
     """Dates of a recurring obligation within [start, end], stepping from the anchor."""
     if freq not in RECURRENCE_FREQS or end < start:
         return []
-    d = anchor
-    guard = 0
-    while d < start and guard < 20000:
-        d = _step_recurrence(d, freq)
-        guard += 1
+    # Skip to the first occurrence on/after start, computing each from the original
+    # anchor so month-end clamping never compounds (Jan 31 -> Feb 28 -> Mar 31).
+    k = 0
+    d = _nth_occurrence(anchor, freq, k)
+    while d < start and k < 20000:
+        k += 1
+        d = _nth_occurrence(anchor, freq, k)
     out: List[dt.date] = []
     while d <= end and len(out) < cap:
         out.append(d)
-        d = _step_recurrence(d, freq)
+        k += 1
+        d = _nth_occurrence(anchor, freq, k)
     return out
 
 
@@ -922,12 +957,40 @@ def build_record(
     return record
 
 
+# --- Malformed-record coercion -------------------------------------------------
+# record.json is user- and git-editable, so any nested field may be null, a string,
+# a list, etc. These helpers normalise the shapes the reader expects so a hand-edited
+# record yields a clean error/empty result instead of an AttributeError traceback.
+
+
+def _as_dict(value: Any) -> JSONObj:
+    return value if isinstance(value, dict) else {}
+
+
+def _as_list(value: Any) -> List[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _dicts(value: Any) -> List[JSONObj]:
+    """List elements that are dicts (skips nulls/strings/etc.)."""
+    return [x for x in _as_list(value) if isinstance(x, dict)]
+
+
+def _dict_at(record: JSONObj, key: str) -> JSONObj:
+    """Return record[key] as a dict, coercing a missing/null/non-dict value to {} in place."""
+    sub = record.get(key)
+    if not isinstance(sub, dict):
+        sub = {}
+        record[key] = sub
+    return sub
+
+
 def record_searchable_text(record: JSONObj) -> str:
     parts: List[str] = [str(record.get("title") or ""), str(record.get("governing_law") or "")]
-    for p in record.get("parties", []):
+    for p in _dicts(record.get("parties")):
         parts.append(str(p.get("name", "")))
         parts.append(str(p.get("role") or ""))
-    for ob in record.get("obligations", []):
+    for ob in _dicts(record.get("obligations")):
         parts.append(str(ob.get("description", "")))
     val = record.get("value", {})
     if isinstance(val, dict):
@@ -978,7 +1041,7 @@ def upcoming_obligations(
     for rid, _dir, rec in load_all_records(vault):
         counterparty = primary_counterparty(rec)
         exp_cap = parse_date(rec.get("expiration_date"))
-        for ob in rec.get("obligations", []):
+        for ob in _dicts(rec.get("obligations")):
             if str(ob.get("status") or "open") not in include:
                 continue
             if type_filter and str(ob.get("type", "")) != type_filter:
@@ -1034,8 +1097,8 @@ def _obligation_line(r: JSONObj) -> str:
 
 
 def primary_counterparty(record: JSONObj) -> str:
-    parties = record.get("parties", [])
-    if parties and isinstance(parties[0], dict):
+    parties = _dicts(record.get("parties"))
+    if parties:
         return str(parties[0].get("name", "")) or "(unknown)"
     return "(unknown)"
 
@@ -1067,13 +1130,13 @@ def review_flags(record: JSONObj, threshold: float = REVIEW_THRESHOLD) -> List[J
             # 'field' is a canonical, accept-compatible path; 'label' is for display only.
             out.append({"field": field, "label": label, "source": src, "confidence": round(conf, 4), "reasons": reasons})
 
-    for name, meta in (record.get("field_meta") or {}).items():
+    for name, meta in _as_dict(record.get("field_meta")).items():
         if isinstance(meta, dict):
             consider(name, name, meta.get("source"), meta.get("confidence"))
-    for i, party in enumerate(record.get("parties", [])):
+    for i, party in enumerate(_as_list(record.get("parties"))):
         if isinstance(party, dict):
             consider(f"parties[{i}]", str(party.get("name", "?")), party.get("source"), party.get("confidence"))
-    for i, ob in enumerate(record.get("obligations", [])):
+    for i, ob in enumerate(_as_list(record.get("obligations"))):
         if isinstance(ob, dict) and ob.get("type") == "obligation":
             consider(f"obligations[{i}]", str(ob.get("description", ""))[:40], ob.get("source"), ob.get("confidence"))
     return out
@@ -1082,7 +1145,7 @@ def review_flags(record: JSONObj, threshold: float = REVIEW_THRESHOLD) -> List[J
 def provenance_summary(record: JSONObj) -> Dict[str, int]:
     """Count field_meta entries by source -- the basis for the ingest --why breakdown."""
     counts = {SOURCE_DETERMINISTIC: 0, SOURCE_LLM: 0, SOURCE_MANUAL: 0, SOURCE_NONE: 0}
-    for meta in (record.get("field_meta") or {}).values():
+    for meta in _as_dict(record.get("field_meta")).values():
         if isinstance(meta, dict):
             src = str(meta.get("source") or SOURCE_NONE)
             counts[src] = counts.get(src, 0) + 1
@@ -1096,7 +1159,8 @@ def recompute_schedule(record: JSONObj) -> None:
     Mirrors build_record's deterministic derivation; used after a manual edit (`accept`) so
     the calendar stays correct. (A test asserts it is a no-op on freshly-ingested records.)
     """
-    term = record.setdefault("term", {})
+    term = _as_dict(record.get("term"))
+    record["term"] = term
     fm = record.get("field_meta", {})
     exp = parse_date(record.get("expiration_date"))
     raw_notice = term.get("notice_period_days")
@@ -1124,10 +1188,10 @@ def recompute_schedule(record: JSONObj) -> None:
     # Preserve lifecycle (status/owner) across recompute, keyed by stable obligation id.
     carry: Dict[str, JSONObj] = {
         str(o["id"]): {"status": o.get("status"), "owner": o.get("owner")}
-        for o in record.get("obligations", [])
-        if isinstance(o, dict) and o.get("id")
+        for o in _dicts(record.get("obligations"))
+        if o.get("id")
     }
-    text_obs = [o for o in record.get("obligations", []) if isinstance(o, dict) and o.get("type") == "obligation"]
+    text_obs = [o for o in _dicts(record.get("obligations")) if o.get("type") == "obligation"]
     derived: List[JSONObj] = []
     if exp is not None:
         derived.append(
@@ -1335,7 +1399,7 @@ def store_record(
     # Idempotency: if any existing record already has this source sha256, skip.
     if sha:
         for rid, _d, rec in load_all_records(vault):
-            if str(rec.get("source", {}).get("sha256", "")) == sha:
+            if str(_as_dict(rec.get("source")).get("sha256", "")) == sha:
                 return rid, False
 
     parties = payload.get("parties", []) or []
@@ -1385,8 +1449,7 @@ def store_record(
         source_vaulted=source_vaulted,
     )
     record_path = deal_dir / RECORD_FILENAME
-    record_path.write_text(_dump_json(record), encoding="utf-8")
-    _harden(record_path, 0o600)
+    _atomic_write_text(record_path, _dump_json(record), mode=0o600)
 
     git_commit(vault, f"ingest: {rel}", paths=[deal_dir])
     return rel, True
@@ -1424,8 +1487,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         "tool": f"contract-vault {__version__}",
         "encrypted": bool(encrypt),
     }
-    (path / VAULT_CONFIG_NAME).write_text(_dump_json(config), encoding="utf-8")
-    _harden(path / VAULT_CONFIG_NAME, 0o600)
+    _atomic_write_text(path / VAULT_CONFIG_NAME, _dump_json(config), mode=0o600)
     readme = path / "README.md"
     if not readme.exists():
         readme.write_text(
@@ -1523,8 +1585,8 @@ def cmd_list(args: argparse.Namespace) -> int:
                         "title": rec.get("title"),
                         "counterparty": primary_counterparty(rec),
                         "expiration_date": rec.get("expiration_date"),
-                        "value": rec.get("value", {}).get("amount"),
-                        "currency": rec.get("value", {}).get("currency"),
+                        "value": _as_dict(rec.get("value")).get("amount"),
+                        "currency": _as_dict(rec.get("value")).get("currency"),
                         "status": rec.get("status"),
                     }
                     for rid, _d, rec in records
@@ -1552,20 +1614,20 @@ def cmd_get(args: argparse.Namespace) -> int:
     _out(_bold(rid))
     _out(f"  title:           {rec.get('title')}")
     _out(f"  status:          {rec.get('status')}  signed_on {rec.get('signed_on')}")
-    _out(f"  parties:         " + ", ".join(f"{p.get('name')} ({p.get('role') or 'party'})" for p in rec.get("parties", [])))
+    _out(f"  parties:         " + ", ".join(f"{p.get('name')} ({p.get('role') or 'party'})" for p in _dicts(rec.get("parties"))))
     _out(f"  effective:       {rec.get('effective_date')}")
     _out(f"  expiration:      {rec.get('expiration_date')}")
-    term = rec.get("term", {})
+    term = _as_dict(rec.get("term"))
     _out(f"  term:            length={term.get('length')} auto_renew={term.get('auto_renew')} notice_days={term.get('notice_period_days')}")
-    if term.get("renewal_window"):
-        rw = term["renewal_window"]
+    rw = _as_dict(term.get("renewal_window"))
+    if rw:
         _out(f"  renewal window:  notice by {rw.get('deadline')} (expires {rw.get('expiration')})")
     _out(f"  governing law:   {rec.get('governing_law')}")
-    val = rec.get("value", {})
+    val = _as_dict(rec.get("value"))
     _out(f"  value:           {val.get('raw')} (amount={val.get('amount')} {val.get('currency') or ''})")
-    src = rec.get("source", {})
+    src = _as_dict(rec.get("source"))
     _out(f"  source:          {src.get('path')} [{src.get('format')}] sha256={str(src.get('sha256'))[:12]} vaulted={src.get('vaulted')}")
-    obs = rec.get("obligations", [])
+    obs = _dicts(rec.get("obligations"))
     if obs:
         _out("  obligations:")
         for ob in obs:
@@ -1574,7 +1636,7 @@ def cmd_get(args: argparse.Namespace) -> int:
             rem = f" reminders={ob.get('reminders')}" if ob.get("reminders") else ""
             st = str(ob.get("status") or "open")
             _out(f"    - {_dim(str(ob.get('id', '')))} [{ob.get('type')}] {st}{owner}{recur}{rem} due {ob.get('due') or '-'}  {ob.get('description')}  ({ob.get('source')}, conf {ob.get('confidence')})")
-    prov = rec.get("provenance", {})
+    prov = _as_dict(rec.get("provenance"))
     _out(_dim(f"  provenance:      from_extract={prov.get('from_extract')} extractor={prov.get('extractor_version')} llm_used={prov.get('llm_used')} ingested {prov.get('ingested_at')}"))
     flags = review_flags(rec)
     if flags:
@@ -1591,7 +1653,7 @@ def cmd_find(args: argparse.Namespace) -> int:
     results: List[Tuple[str, Path, JSONObj]] = []
     for rid, d, rec in records:
         if args.counterparty:
-            if args.counterparty.lower() not in " ".join(str(p.get("name", "")) for p in rec.get("parties", [])).lower():
+            if args.counterparty.lower() not in " ".join(str(p.get("name", "")) for p in _dicts(rec.get("parties"))).lower():
                 continue
         if args.governing_law:
             if args.governing_law.lower() not in str(rec.get("governing_law") or "").lower():
@@ -1602,18 +1664,18 @@ def cmd_find(args: argparse.Namespace) -> int:
                 continue
         if getattr(args, "currency", None):
             want = args.currency.strip().lower()
-            cur = rec.get("value", {}).get("currency")
+            cur = _as_dict(rec.get("value")).get("currency")
             if want in ("none", "unknown", "null", "-"):
                 if cur is not None:
                     continue
             elif str(cur or "").lower() != want:
                 continue
         if getattr(args, "value_gt", None) is not None:
-            amount = rec.get("value", {}).get("amount")
+            amount = _as_dict(rec.get("value")).get("amount")
             if not isinstance(amount, (int, float)) or amount <= args.value_gt:
                 continue
         if getattr(args, "auto_renew", False):
-            if rec.get("term", {}).get("auto_renew") is not True:
+            if _as_dict(rec.get("term")).get("auto_renew") is not True:
                 continue
         if args.text:
             if args.text.lower() not in record_searchable_text(rec):
@@ -1654,9 +1716,9 @@ def cmd_find(args: argparse.Namespace) -> int:
                         "counterparty": primary_counterparty(rec),
                         "expiration_date": rec.get("expiration_date"),
                         "governing_law": rec.get("governing_law"),
-                        "value": rec.get("value", {}).get("amount"),
-                        "currency": rec.get("value", {}).get("currency"),
-                        "auto_renew": rec.get("term", {}).get("auto_renew"),
+                        "value": _as_dict(rec.get("value")).get("amount"),
+                        "currency": _as_dict(rec.get("value")).get("currency"),
+                        "auto_renew": _as_dict(rec.get("term")).get("auto_renew"),
                     }
                     for rid, _d, rec in results
                 ],
@@ -1667,7 +1729,7 @@ def cmd_find(args: argparse.Namespace) -> int:
         _out(_dim("(no matches)"))
         return EXIT_OK
     for rid, _d, rec in results:
-        val = rec.get("value", {})
+        val = _as_dict(rec.get("value"))
         amt = val.get("amount")
         money = (
             f"{amt:,.0f} {val.get('currency') or '?'}"
@@ -1775,7 +1837,7 @@ def cmd_stats(args: argparse.Namespace) -> int:
         by_counterparty[cp] = by_counterparty.get(cp, 0) + 1
         law = rec.get("governing_law") or "(unspecified)"
         by_law[law] = by_law.get(law, 0) + 1
-        val = rec.get("value", {})
+        val = _as_dict(rec.get("value"))
         amount = val.get("amount")
         if isinstance(amount, (int, float)) and not isinstance(amount, bool):
             cur = val.get("currency") or "(unknown)"
@@ -1783,9 +1845,9 @@ def cmd_stats(args: argparse.Namespace) -> int:
         exp = parse_date(rec.get("expiration_date"))
         if exp is not None and today <= exp <= soon:
             expiring_soon += 1
-        if rec.get("term", {}).get("auto_renew") is True:
+        if _as_dict(rec.get("term")).get("auto_renew") is True:
             auto_renew += 1
-        if rec.get("provenance", {}).get("llm_used") is True:
+        if _as_dict(rec.get("provenance")).get("llm_used") is True:
             llm_used += 1
         if review_flags(rec):
             needs_review += 1
@@ -1830,11 +1892,11 @@ def export_rows(records: List[Tuple[str, Path, JSONObj]], as_of: dt.date) -> Lis
     """One flat reporting row per deal (the basis for csv/md/json export)."""
     rows: List[JSONObj] = []
     for rid, _d, rec in records:
-        term = rec.get("term", {}) or {}
-        rw = term.get("renewal_window") or {}
-        val = rec.get("value", {}) or {}
+        term = _as_dict(rec.get("term"))
+        rw = _as_dict(term.get("renewal_window"))
+        val = _as_dict(rec.get("value"))
         upcoming = sorted(
-            d for d in (parse_date(o.get("due")) for o in rec.get("obligations", []))
+            d for d in (parse_date(o.get("due")) for o in _dicts(rec.get("obligations")))
             if d is not None and d >= as_of
         )
         rows.append(
@@ -1853,7 +1915,7 @@ def export_rows(records: List[Tuple[str, Path, JSONObj]], as_of: dt.date) -> Lis
                 "value_currency": val.get("currency") or "",
                 "next_due": upcoming[0].isoformat() if upcoming else "",
                 "needs_review": len(review_flags(rec)),
-                "vaulted": bool(rec.get("source", {}).get("vaulted", False)),
+                "vaulted": bool(_as_dict(rec.get("source")).get("vaulted", False)),
             }
         )
     return rows
@@ -1925,7 +1987,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     findings: List[str] = []
     checked = 0
     for rid, d, rec in load_all_records(vault):
-        src = rec.get("source", {})
+        src = _as_dict(rec.get("source"))
         if src.get("vaulted") and src.get("path") and src.get("sha256"):
             f = d / str(src["path"])
             if not f.exists():
@@ -2010,17 +2072,17 @@ def _apply_value(record: JSONObj, field: str, raw: str) -> None:
             raise UsageError(f"--value {raw!r} is not a recognizable date for {field}")
         record[field] = d.isoformat()
     elif field == "term.length":
-        record.setdefault("term", {})["length"] = raw
+        _dict_at(record, "term")["length"] = raw
     elif field == "term.auto_renew":
         b = _parse_bool(raw)
         if b is None:
             raise UsageError(f"--value {raw!r} is not a boolean (use true/false) for {field}")
-        record.setdefault("term", {})["auto_renew"] = b
+        _dict_at(record, "term")["auto_renew"] = b
     elif field == "term.notice_period_days":
         m = re.search(r"\d+", raw)
         if not m:
             raise UsageError(f"--value {raw!r} has no day count for {field}")
-        record.setdefault("term", {})["notice_period_days"] = int(m.group())
+        _dict_at(record, "term")["notice_period_days"] = int(m.group())
     else:  # pragma: no cover - guarded by ACCEPTABLE_FIELDS
         raise UsageError(f"--value not supported for field {field!r}")
 
@@ -2034,7 +2096,7 @@ def _accept_field(record: JSONObj, field: str, value: Optional[str]) -> bool:
     party_match = re.fullmatch(r"parties\[(\d+)\]", field)
     if party_match:
         idx = int(party_match.group(1))
-        parties = record.get("parties", [])
+        parties = _as_list(record.get("parties"))
         if idx >= len(parties) or not isinstance(parties[idx], dict):
             raise UsageError(f"no parties[{idx}] on this record")
         if value is not None:
@@ -2045,7 +2107,7 @@ def _accept_field(record: JSONObj, field: str, value: Optional[str]) -> bool:
     ob_match = re.fullmatch(r"obligations\[(\d+)\]", field)
     if ob_match:
         idx = int(ob_match.group(1))
-        obs = record.get("obligations", [])
+        obs = _as_list(record.get("obligations"))
         if idx >= len(obs) or not isinstance(obs[idx], dict):
             raise UsageError(f"no obligations[{idx}] on this record")
         if value is not None:
@@ -2056,7 +2118,7 @@ def _accept_field(record: JSONObj, field: str, value: Optional[str]) -> bool:
     if field in ACCEPTABLE_FIELDS:
         if value is not None:
             _apply_value(record, field, value)
-        record.setdefault("field_meta", {})[field] = {"source": SOURCE_MANUAL, "confidence": 1.0}
+        _dict_at(record, "field_meta")[field] = {"source": SOURCE_MANUAL, "confidence": 1.0}
         return field in SCHEDULE_FIELDS
     raise UsageError(
         f"unknown field {field!r}; acceptable: "
@@ -2119,9 +2181,10 @@ def cmd_accept(args: argparse.Namespace) -> int:
     for deal_dir, (_rid, rec) in resolved.items():
         if schedule_dirty.get(deal_dir):
             recompute_schedule(rec)
-        rec.setdefault("provenance", {})["last_reviewed_at"] = _now_iso()
-        (deal_dir / RECORD_FILENAME).write_text(_dump_json(rec), encoding="utf-8")
-        _harden(deal_dir / RECORD_FILENAME, 0o600)
+        prov = _as_dict(rec.get("provenance"))
+        rec["provenance"] = prov
+        prov["last_reviewed_at"] = _now_iso()
+        _atomic_write_text(deal_dir / RECORD_FILENAME, _dump_json(rec), mode=0o600)
         paths.append(deal_dir)
 
     if from_file:
@@ -2159,10 +2222,10 @@ def risk_items(records: List[Tuple[str, Path, JSONObj]], as_of: dt.date, within_
     items: List[JSONObj] = []
     for rid, _d, rec in records:
         cp = primary_counterparty(rec)
-        term = rec.get("term", {}) or {}
+        term = _as_dict(rec.get("term"))
         exp = parse_date(rec.get("expiration_date"))
         auto = term.get("auto_renew")
-        deadline = parse_date((term.get("renewal_window") or {}).get("deadline"))
+        deadline = parse_date(_as_dict(term.get("renewal_window")).get("deadline"))
         active = exp is None or exp >= as_of
         if not active:
             continue
@@ -2242,7 +2305,7 @@ def cmd_history(args: argparse.Namespace) -> int:
 
 def find_obligation(record: JSONObj, ref: str) -> JSONObj:
     """Resolve an obligation within a record by id, unique id-prefix, or [i] index."""
-    obs = [o for o in record.get("obligations", []) if isinstance(o, dict)]
+    obs = _dicts(record.get("obligations"))
     idx_match = re.fullmatch(r"\[?(\d+)\]?", ref)
     if idx_match:
         i = int(idx_match.group(1))
@@ -2265,6 +2328,10 @@ def cmd_obligation(args: argparse.Namespace) -> int:
     vault = resolve_vault(args)
     rid, deal_dir, rec = find_deal(vault, args.deal)
     ob = find_obligation(rec, args.id)
+    # An index-resolved obligation may lack an "id"; stamp the stable one so the
+    # commit message / output / JSON below never raise KeyError on a hand-edited record.
+    if not ob.get("id"):
+        ob["id"] = obligation_id(ob)
     status = getattr(args, "status", None)
     owner = getattr(args, "owner", None)
     recurrence = getattr(args, "recurrence", None)
@@ -2293,9 +2360,10 @@ def cmd_obligation(args: argparse.Namespace) -> int:
             if any(v < 0 for v in vals):
                 raise UsageError("--reminders must be non-negative day counts")
             ob["reminders"] = sorted(set(vals), reverse=True)
-    rec.setdefault("provenance", {})["last_reviewed_at"] = _now_iso()
-    (deal_dir / RECORD_FILENAME).write_text(_dump_json(rec), encoding="utf-8")
-    _harden(deal_dir / RECORD_FILENAME, 0o600)
+    prov = _as_dict(rec.get("provenance"))
+    rec["provenance"] = prov
+    prov["last_reviewed_at"] = _now_iso()
+    _atomic_write_text(deal_dir / RECORD_FILENAME, _dump_json(rec), mode=0o600)
     git_commit(vault, f"obligation: {rid} {ob['id']} status={ob.get('status')}", paths=[deal_dir])
     _why(args, "obligation", f"deal={rid}", f"id={ob['id']}", f"status={ob.get('status')}",
          f"owner={ob.get('owner')}", f"recurrence={ob.get('recurrence')}", f"reminders={ob.get('reminders')}")
@@ -2364,8 +2432,6 @@ def cmd_config(args: argparse.Namespace) -> int:
 
 
 def cmd_demo(args: argparse.Namespace) -> int:
-    import tempfile
-
     tmp = tempfile.mkdtemp(prefix="contract-vault-demo-")
     try:
         vault = Path(tmp) / "vault"
@@ -2814,6 +2880,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except KeyboardInterrupt:
         _eprint("interrupted")
         return 130
+    except Exception as exc:  # noqa: BLE001 - last-resort backstop: no traceback for malformed state
+        # A malformed/hand-edited record.json or vault state can surface unexpected
+        # errors deep in a command; surface a clean message instead of a traceback.
+        _eprint(_red(f"error: {exc}"))
+        return EXIT_USAGE
 
 
 if __name__ == "__main__":
