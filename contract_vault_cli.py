@@ -42,7 +42,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, cast
 
-__version__ = "0.5.1"
+__version__ = "0.5.2"
 
 # ---------------------------------------------------------------------------
 # Constants

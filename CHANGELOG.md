@@ -8,6 +8,23 @@ new optional fields are minor additions.
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-06-03
+
+### Fixed — date-math hardening (source audit)
+- **Crafted numeric inputs no longer crash date arithmetic.** Hand-edited
+  `record.json` or crafted extract payloads could feed unbounded ints into
+  `timedelta`/`date` math, raising `OverflowError`/`ValueError` instead of a clean
+  error. `term.notice_period_days` is now clamped to `0..MAX_HORIZON_DAYS` (renewal
+  window dropped when out of range); obligation lead-day reminders are clamped in
+  `_coerce_leads`; `parse_within` is capped at ~100 years with a `UsageError`; and the
+  due/remind horizon plus recurrence stepping saturate at `date` bounds, so a
+  far-future `--as-of` cannot overflow.
+- **`accept --from <review-output>` validates entries** and raises a structured
+  `UsageError` instead of a raw `AttributeError`/`KeyError` on a malformed deal/flag.
+- **Backstop exit code corrected.** `main()`'s last-resort handler now returns exit `1`
+  (runtime failure); exit `2` is reserved for argparse/`UsageError`, matching the
+  documented contract and the sibling `VaultError`/`OSError` handlers.
+
 ### Security (supply chain / CI — no package code change)
 - **GitHub Actions pinned to commit SHAs** (was floating tags) — closes the highest-impact
   CI risk, since `publish.yml` holds PyPI publishing rights. **Dependabot** keeps them current.
