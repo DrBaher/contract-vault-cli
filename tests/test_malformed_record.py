@@ -122,7 +122,8 @@ def test_main_backstop_catches_generic_exception(
     monkeypatch: pytest.MonkeyPatch, empty_vault: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # A command that raises an unexpected (non-VaultError/OSError) exception should be
-    # caught by main()'s backstop: clean `error: ...` to stderr + exit 2, no traceback.
+    # caught by main()'s backstop: clean `error: ...` to stderr + exit 1 (runtime
+    # failure), no traceback. Exit 2 is reserved for argparse/UsageError (bad usage).
     def boom(*args: Any, **kwargs: Any) -> Any:
         raise RuntimeError("unexpected internal state")
 
@@ -130,7 +131,7 @@ def test_main_backstop_catches_generic_exception(
     # we inject the failure into a helper the command invokes rather than the command itself.
     monkeypatch.setattr(cv, "load_all_records", boom)
     rc = cv.main(["stats", "--vault", str(empty_vault)])
-    assert rc == cv.EXIT_USAGE
+    assert rc == cv.EXIT_FAIL
     err = capsys.readouterr().err
     assert "unexpected internal state" in err
     assert "Traceback" not in err

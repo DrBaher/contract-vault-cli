@@ -66,6 +66,11 @@ EXIT_OK = 0
 EXIT_FAIL = 1
 EXIT_USAGE = 2
 
+# Upper bound (in days, ~100 years) for any user/record-supplied day count that is
+# later fed to dt.timedelta or date arithmetic. timedelta and dt.date overflow well
+# beyond this; clamping keeps malformed/hand-edited input from crashing date math.
+MAX_HORIZON_DAYS = 36500
+
 # Output state, configured once in main() from flags + environment.
 _NO_COLOR = False
 _QUIET = False
@@ -712,10 +717,26 @@ _RECURRENCE_PATTERNS = [
 ]
 
 
+def _add_days_clamped(d: dt.date, days: int) -> dt.date:
+    """`d + timedelta(days=days)`, saturating at dt.date.min/max instead of overflowing.
+    A far-future --as-of plus even a capped horizon can exceed dt.date.max (year 9999)."""
+    try:
+        return d + dt.timedelta(days=days)
+    except OverflowError:
+        return dt.date.max if days >= 0 else dt.date.min
+
+
 def _add_months(d: dt.date, n: int) -> dt.date:
     m = d.month - 1 + n
     year = d.year + m // 12
     month = m % 12 + 1
+    # Saturate at dt.date.max/min: a far-future anchor stepped forward can exceed
+    # year 9999, which dt.date(...) rejects with ValueError. Clamping keeps
+    # recurrence expansion from crashing near the date bounds.
+    if year > dt.MAXYEAR:
+        return dt.date.max
+    if year < dt.MINYEAR:
+        return dt.date.min
     last = calendar.monthrange(year, month)[1]
     return dt.date(year, month, min(d.day, last))
 
@@ -767,7 +788,16 @@ def recurrence_occurrences(anchor: dt.date, freq: str, start: dt.date, end: dt.d
 def _coerce_leads(value: Any) -> List[int]:
     if not isinstance(value, list):
         return []
-    return sorted({int(x) for x in value if isinstance(x, (int, float)) and not isinstance(x, bool) and x >= 0}, reverse=True)
+    # Drop negative and absurdly large lead-days: a hand-edited reminder above ~100
+    # years would overflow `as_of + timedelta(days=max(reminders))` in projection.
+    return sorted(
+        {
+            int(x)
+            for x in value
+            if isinstance(x, (int, float)) and not isinstance(x, bool) and 0 <= x <= MAX_HORIZON_DAYS
+        },
+        reverse=True,
+    )
 
 
 def obligation_reminders(ob: JSONObj, defaults: Optional[JSONObj] = None) -> List[int]:
@@ -841,6 +871,11 @@ def build_record(
     elif isinstance(np_val, str):
         nm = re.search(r"\d+", np_val)
         notice_days = int(nm.group()) if nm else None
+    # Clamp a crafted/absurd notice period out of range: a value above ~100 years
+    # would overflow `expiration - timedelta(days=notice_days)` below. Drop it
+    # (no renewal window) rather than crash on malformed input.
+    if notice_days is not None and not (0 <= notice_days <= MAX_HORIZON_DAYS):
+        notice_days = None
     record_field("term.length", len_conf, len_src)
     record_field("term.auto_renew", ar_conf, ar_src)
     record_field("term.notice_period_days", np_conf, np_src)
@@ -1011,7 +1046,11 @@ def parse_within(text: str) -> int:
         raise UsageError(f"invalid --within value: {text!r} (try 30d, 60d, 90d)")
     n = int(m.group(1))
     unit = m.group(2) or "d"
-    return {"d": n, "w": n * 7, "m": n * 30, "y": n * 365}[unit]
+    days = {"d": n, "w": n * 7, "m": n * 30, "y": n * 365}[unit]
+    # Cap at ~100 years: a larger window overflows `as_of + timedelta(days=...)`.
+    if days > MAX_HORIZON_DAYS:
+        raise UsageError(f"--within window too large: {text!r} (max ~100 years)")
+    return days
 
 
 def upcoming_obligations(
@@ -1034,7 +1073,7 @@ def upcoming_obligations(
     reminder is currently active -- i.e. `0 <= days_until <= max(its reminders)`.
     """
     include = set(statuses) if statuses else {"open"}
-    horizon = as_of + dt.timedelta(days=within_days)
+    horizon = _add_days_clamped(as_of, within_days)
     reminder_defaults = load_vault_config(vault).get("reminder_defaults")
     reminder_defaults = reminder_defaults if isinstance(reminder_defaults, dict) else {}
     rows: List[JSONObj] = []
@@ -1053,7 +1092,7 @@ def upcoming_obligations(
                 continue  # dateless obligation: tracked, but no calendar entry
             reminders = obligation_reminders(ob, reminder_defaults)
             # remind_only: each obligation's own reminder window; else the shared horizon.
-            end = (as_of + dt.timedelta(days=max(reminders))) if remind_only else horizon
+            end = _add_days_clamped(as_of, max(reminders)) if remind_only else horizon
             freq = ob.get("recurrence") if ob.get("recurrence") in RECURRENCE_FREQS else None
             if freq:
                 # Recurring: expand into occurrences, capped at the contract's expiration.
@@ -1165,6 +1204,10 @@ def recompute_schedule(record: JSONObj) -> None:
     exp = parse_date(record.get("expiration_date"))
     raw_notice = term.get("notice_period_days")
     notice = raw_notice if isinstance(raw_notice, int) and not isinstance(raw_notice, bool) else None
+    # Clamp out-of-range notice periods (see build_record): an absurd value would
+    # overflow `exp - timedelta(days=notice)` below. Drop the renewal window instead.
+    if notice is not None and not (0 <= notice <= MAX_HORIZON_DAYS):
+        notice = None
     auto = term.get("auto_renew") if isinstance(term.get("auto_renew"), bool) else None
 
     def meta(name: str) -> Tuple[str, float]:
@@ -2139,7 +2182,11 @@ def _load_accept_file(path: Path) -> List[Tuple[str, str, Optional[str]]]:
             out.append((str(item["deal"]), str(item["field"]), None if val is None else str(val)))
     elif isinstance(data, dict) and isinstance(data.get("deals"), list):
         for deal in data["deals"]:  # review --json output: accept every listed flag as-is
-            for fl in deal.get("flags", []):
+            if not isinstance(deal, dict) or "id" not in deal:
+                raise UsageError("each --from deal needs an 'id'")
+            for fl in deal.get("flags", []) or []:
+                if not isinstance(fl, dict) or "field" not in fl:
+                    raise UsageError("each --from flag needs a 'field'")
                 out.append((str(deal["id"]), str(fl["field"]), None))
     else:
         raise UsageError("--from file must be a list of {deal,field,value?} or `review --json` output")
@@ -2883,8 +2930,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except Exception as exc:  # noqa: BLE001 - last-resort backstop: no traceback for malformed state
         # A malformed/hand-edited record.json or vault state can surface unexpected
         # errors deep in a command; surface a clean message instead of a traceback.
+        # This is a runtime failure (exit 1), not a bad invocation (exit 2): exit 2
+        # is reserved for argparse/UsageError, matching the sibling handlers above.
         _eprint(_red(f"error: {exc}"))
-        return EXIT_USAGE
+        return EXIT_FAIL
 
 
 if __name__ == "__main__":
